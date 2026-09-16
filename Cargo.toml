@@ -2,16 +2,10 @@
 # AGPL License
 [package]
 name = "lego-mosaic"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "LEGO Mosaic Maker: picture-to-mosaic converter web app"
+description = "Private, browser-side LEGO mosaic design in Rust"
 
-# The conversion core (`src/lib.rs` and friends) compiles to a
-# zero-dependency wasm module that runs in the browser; the `lego-mosaic`
-# binary is only a static file server for the page and the module. Build
-# both targets:
-#   cargo build                      (host: the server binary, `co` gate)
-#   cargo build --target wasm32-unknown-unknown --release  (the module)
 [lib]
 name = "lego_mosaic"
 crate-type = ["cdylib", "rlib"]
@@ -22,11 +16,25 @@ name = "lego-mosaic"
 path = "src/main.rs"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
-# Deny warnings on every rustc invocation (plain `cargo build` too), matching
-# the monorepo convention.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4.78"
+js-sys = "0.3.105"
+web-sys = { version = "0.3.105", features = [
+  "Window", "Document", "Element", "Node", "NodeList", "EventTarget", "Event", "MouseEvent",
+  "HtmlElement", "HtmlInputElement", "HtmlSelectElement", "HtmlButtonElement", "HtmlAnchorElement",
+  "HtmlImageElement", "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "ImageBitmap",
+  "File", "FileList", "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "DomTokenList",
+  "CssStyleDeclaration", "HtmlCollection", "HtmlFieldSetElement", "Performance", "console"
+] }
+
 [lints.rust]
 warnings = "deny"
 
 [profile.release]
 strip = true
+lto = true
+opt-level = "s"

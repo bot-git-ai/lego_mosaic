@@ -1,62 +1,99 @@
 # lego_mosaic (`lego_mosaic/`)
 
-LEGO Mosaic Maker: picture → round-plate mosaic web app. The whole
-conversion runs **in the browser**: a zero-dependency Rust→wasm module
-does the pixel work, the server binary only serves static assets.
+Mosaic Studio: private browser-side picture → LEGO tile mosaic. Both conversion
+and application behavior are Rust. The native binary is only a static HTTP host.
+Images are not uploaded or persisted. Gateway mounts this app at `/lego-mosaic/`.
 
-## Running
-
-`target/release/lego-mosaic` listens on `127.0.0.1:3210` (override with
-`LEGO_MOSAIC_ADDR`). Deployed as the `lego-mosaic.service` systemd unit;
-bot-web reverse-proxies it under the `/lego-mosaic` prefix, so it's at
-`https://bot.<tailnet>.ts.net/lego-mosaic/`. The proxy only ever relays
-three GETs (`/`, `/mosaic.wasm`, `/healthz`) — no POST endpoints exist,
-so proxy/body/header quirks can't break conversions.
-
-## Building
-
-Both targets build from this one crate:
+## Build and run
 
 ```
-./build-wasm.sh            # wasm module → assets/lego_mosaic.wasm (committed)
-cargo build --release      # server binary (embeds assets/lego_mosaic.wasm)
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.128 --locked
+./build-wasm.sh
+cargo test --locked
+cargo build --release --locked
 ```
 
-The wasm module needs `rustup target add wasm32-unknown-unknown` once.
-`assets/lego_mosaic.wasm` is committed so the released binary is
-self-contained; `main.rs` test asserts the embedded bytes start with the
-`\0asm` magic.
+`build-wasm.sh` builds the wasm library and generates `assets/mosaic.js` and
+`assets/mosaic_bg.wasm`. BOTH are committed and embedded in the native binary.
+Rebuild them after any browser/core/palette/render change, BEFORE building the
+server. No npm/JS build tool is needed. A tiny dynamic-import loader in ui.html
+and generated wasm-bindgen platform bindings are the only JavaScript in the app;
+there is no handwritten JavaScript application or raw-pointer conversion ABI.
 
-## Design
+Server: `target/release/lego-mosaic`, default `127.0.0.1:3210`, override
+`LEGO_MOSAIC_ADDR`. Unit `lego-mosaic.service`. Routes are prefix-free:
+`/`, `/mosaic.js`, `/mosaic_bg.wasm`, `/healthz`; GET only. Release with Cobalt,
+then `sudo systemctl restart lego-mosaic.service`. Gateway strips the app prefix.
+Bounded HTTP connection count and I/O deadlines; assets are served no-store.
 
-- `color.rs` — sRGB → CIELAB (D65) and CIEDE2000. Matching is perceptual,
-  never raw RGB: that's the main reason the official converter looks muddy.
-- `palette.rs` — tile palettes: the 5 official Mosaic Maker colors,
-  a grayscale ramp, and a 34-color extended round-plate (98138) palette.
-  Hex values are LDraw-style approximations.
-- `mosaic.rs` — pipeline on a plain RGBA8 `Raster`: crop-to-aspect (studs
-  are square; crop, never stretch) → area-filter downscale to a 4× hi-res
-  grid → brightness / contrast / saturation → optional white-background
-  forcing → mapping. Two orders: `Sharp` (quantize hi-res, majority-vote
-  per stud — flat art, default) and `Smooth` (average per stud — photos);
-  optional serpentine Floyd–Steinberg dithering for gradients.
-- `render.rs` — SVG stud preview, parts counts, bottom-up build rows.
-- `lib.rs` — the wasm ABI: `convert` plus `palettes_json`/`defaults_json`
-  metadata exports. Hand-rolled C ABI (no wasm-bindgen): strings come back
-  through one output slot (`output_ptr`/`output_len`), buffers are
-  `alloc_buf`/`drop_buf`. `main.rs`'s old `json_string` escaping lives here.
-- `server.rs` — minimal HTTP/1.1, GET-only, static assets only.
-- `main.rs` — routes: `/` (page), `/mosaic.wasm` (module), `/healthz`.
-- `ui.rs` + `ui.html` — single static page, vanilla JS: decodes the image
-  on a canvas (`createImageBitmap`), copies the RGBA bytes into the module
-  and calls `convert`; palette swatches and form defaults come from the
-  module, never duplicated in the HTML.
+## Code map
 
-## Conventions
+- `mosaic.rs`: bounded RGBA Raster → fractional-area resampling with contain or
+  positioned/zoomed crop → configurable color adjustment/remapping → perceptual
+  matching. Sharp mode preserves dark feature coverage; Smooth pools linear
+  light. Both support serpentine final-stud dithering. Conservative deterministic
+  despeckling is skipped during dithering. Options serde defaults and bounds are
+  in this file; dimensions sanitized 1–192 (UI allows 8–128).
+- `color.rs`: sRGB↔Lab building blocks and tested CIEDE2000 distance.
+- `palette.rs`: official five = WHITE, LIGHT GRAY, DARK GRAY, BLACK, YELLOW.
+  Six-color grayscale and extended 34-color sets also available. RGB values are
+  approximations, NOT verified color/part stock. Part 98138 is a round TILE.
+  Stable app IDs and two-digit symbols are not manufacturer numeric IDs.
+- `render.rs`: exact-color flat SVG, round-tile SVG, numbered vector build guide,
+  CSV, counts and bottom-up rows. All output symbols use TileColor::symbol(),
+  never count-sorted or post-exclusion indices.
+- `browser.rs`: wasm-only Rust web-sys DOM/events, image decode/canvas, presets,
+  palette exclusions, errors, original/converted previews, exports and print.
+  Busy state serializes decode/build; changing settings marks old outputs stale.
+- `ui.html`, `ui.rs`: accessible responsive static shell and loader-failure UI.
+- `main.rs`, `server.rs`: static host, no image API.
 
-- Zero runtime dependencies (no `image`, no serde, no wasm-bindgen): image
-  decoding is the browser's canvas; JSON is hand-rolled.
-- `[lints.rust] warnings = "deny"` — keep `cargo build` warning-free.
-- Tests are hermetic; `cargo test` covers the full conversion pipeline on
-  the host target. The wasm ABI is exercised the same way in a browser or
-  `node -e` (instantiation + `convert` round-trip).
+## Illustration recoloring
+
+Default Clean artwork keeps the entire image (48×48, contain), preserves dark
+small details and has no dithering. Two independently configurable HSV family
+rules act on original resampled color membership, before global adjustments:
+
+1. Muted pink/red: center 340°, range ±55°, minimum saturation 7%; Auto maps to
+   a bright accent in constrained palettes (yellow in the five-color kit).
+2. Pale lavender: center 250°, range ±35°, minimum saturation 2.5%; Auto maps to
+   the brightest enabled neutral midtone in palettes of six colors or fewer.
+   This distinguishes pale illustrated subjects from white backgrounds.
+
+These are deliberate inferred illustration defaults, not semantic recognition.
+Both rules have Natural (off), Auto, Gray and custom target treatments, hue/range,
+threshold and strength controls. Auto leaves extended palettes natural. Photo
+and grayscale presets explicitly disable BOTH rules. White paper and dark ink
+are protected; near-white cleanup is conservative, not background segmentation.
+
+## Verification
+
+```
+cargo clippy --all-targets -- -D warnings
+cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
+PLAYWRIGHT_MODULE=/path/to/playwright-core node tests/browser_smoke.cjs [image.png]
+```
+
+Browser test needs externally installed playwright-core and Chromium (default
+`/usr/bin/chromium`, override `CHROMIUM`). It starts/stops its OWN test server at
+3333; alternatively `MOSAIC_TEST_URL` tests an existing host. Tests known-image
+conversion, bottom-up rows, stable symbols, SVG/CSV downloads, persistent
+exclusions, all-excluded guard, decode recovery and module-load errors. Optional
+image also tests family remapping, dithering, 128×128 build, mobile layout and
+local-only requests. Private test images must NOT be committed.
+
+## Known limitations
+
+- UI computation is main-thread wasm; large builds pause interaction after the
+  busy state paints. Tested 128×128 extended photo took ~5.9s including rendering
+  in Pi Chromium. Worker/cancellation would be a future improvement.
+- Retained canvas/preview max side 2048; files capped 40 MiB and decoded images
+  over 32 MP rejected. Browser decoding occurs before dimensions are known, so
+  this is NOT an absolute peak decode-memory guarantee.
+- Printable HTML guide is best for normal 48/64 widths; large guides are easier
+  to zoom from the downloaded vector SVG. No inventory quantity constraints,
+  pricing, or verified current part availability.
+
+Warnings are denied. Native tests use the same Rust core; browser end-to-end
+checks are essential because native tests cannot prove DOM/loader integration.

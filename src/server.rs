@@ -9,7 +9,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-/// Requests are images or small forms; 25 MB matches bot-web's upload cap.
+/// Static GET request headers only; image data never reaches this server.
 const MAX_HEAD_BYTES: usize = 32 * 1024;
 const HEAD_SEPARATOR: &[u8] = b"\r\n\r\n";
 
@@ -75,7 +75,11 @@ pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Req
     // Read until the end of the headers; the (empty) body is ignored.
     let head_len = loop {
         if let Some(position) = find(&buffer, HEAD_SEPARATOR) {
-            break position + HEAD_SEPARATOR.len();
+            let end = position + HEAD_SEPARATOR.len();
+            if end > MAX_HEAD_BYTES {
+                return Ok(None);
+            }
+            break end;
         }
         if buffer.len() > MAX_HEAD_BYTES {
             return Ok(None);
