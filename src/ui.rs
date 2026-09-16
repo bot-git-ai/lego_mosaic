@@ -171,7 +171,10 @@ function pickFile(f) {{
   drop.classList.add("has-file");
 }}
 fileInput.addEventListener("change", () => pickFile(fileInput.files[0]));
-drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("click", e => {{
+  if (e.target === fileInput) return; // synthetic click from .click() bubbling up
+  fileInput.click();
+}});
 drop.addEventListener("dragover", e => {{ e.preventDefault(); }});
 drop.addEventListener("drop", e => {{
   e.preventDefault();
