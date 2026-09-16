@@ -5,6 +5,10 @@
 //! an area (box) filter, optional preprocessing (saturation, contrast,
 //! brightness, background cleanup), then map each stud to a palette color.
 //!
+//! Input is a plain RGBA8 buffer — the browser decodes the uploaded file
+//! (canvas `drawImage`) and hands the pixels over, so this crate has no
+//! image-format dependencies and compiles to a tiny wasm module.
+//!
 //! Two matching orders are supported because they behave very differently:
 //! - `Sharp`: quantize the hi-res image first, then take the majority color
 //!   per stud cell. Preserves the edges of flat/cartoon art — the default.
@@ -28,6 +32,33 @@
 )]
 
 use crate::color::{delta_e_2000, Lab, Srgb};
+
+/// A decoded image: RGBA8, row-major, `width × height` pixels.
+#[derive(Clone, Debug)]
+pub(crate) struct Raster {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    /// Exactly `width * height * 4` bytes.
+    pub(crate) pixels: Vec<u8>,
+}
+
+impl Raster {
+    /// Pixel accessor with bounds guaranteed by construction.
+    fn pixel(&self, x: usize, y: usize) -> [u8; 4] {
+        let i = (y * self.width + x) * 4;
+        [
+            self.pixels[i],
+            self.pixels[i + 1],
+            self.pixels[i + 2],
+            self.pixels[i + 3],
+        ]
+    }
+
+    pub(crate) fn put(&mut self, x: usize, y: usize, rgba: [u8; 4]) {
+        let i = (y * self.width + x) * 4;
+        self.pixels[i..i + 4].copy_from_slice(&rgba);
+    }
+}
 
 /// Conversion knobs; the UI form fields map 1:1 onto these.
 #[derive(Clone, Debug)]
@@ -106,7 +137,7 @@ const OVERSAMPLE: usize = 4;
 
 /// Run the full pipeline on an RGBA8 image.
 pub(crate) fn convert(
-    image: &image::RgbaImage,
+    image: &Raster,
     palette: &[crate::palette::TileColor],
     options: &Options,
 ) -> Mosaic {
@@ -122,9 +153,8 @@ pub(crate) fn convert(
         force_background(&mut hi);
     }
 
-    let labs: Vec<Lab> = hi
-        .pixels()
-        .map(|p| Srgb::new(p.0[0], p.0[1], p.0[2]).to_lab())
+    let labs: Vec<Lab> = (0..hi.width * hi.height)
+        .map(|i| Srgb::new(hi.pixels[i * 4], hi.pixels[i * 4 + 1], hi.pixels[i * 4 + 2]).to_lab())
         .collect();
 
     let mut grid = match options.order {
@@ -164,27 +194,41 @@ fn excluded_palette(
 /// Crop the image to the target aspect ratio (centered), without scaling.
 /// The mosaic's studs are square, so the source must be cropped, never
 /// stretched.
-fn crop_to_aspect(image: &image::RgbaImage, width: usize, height: usize) -> image::RgbaImage {
+fn crop_to_aspect(image: &Raster, width: usize, height: usize) -> Raster {
     let target = width as f64 / height as f64;
-    let (w, h) = (image.width(), image.height());
-    let current = f64::from(w) / f64::from(h);
+    let (w, h) = (image.width, image.height);
+    let current = w as f64 / h as f64;
     let (crop_w, crop_h) = if current > target {
-        ((f64::from(h) * target).round().max(1.0) as u32, h)
+        ((h as f64 * target).round().max(1.0) as usize, h)
     } else {
-        (w, (f64::from(w) / target).round().max(1.0) as u32)
+        (w, ((w as f64) / target).round().max(1.0) as usize)
     };
     let x0 = w.saturating_sub(crop_w) / 2;
     let y0 = h.saturating_sub(crop_h) / 2;
-    image::imageops::crop_imm(image, x0, y0, crop_w, crop_h).to_image()
+    let mut out = Vec::with_capacity(crop_w * crop_h * 4);
+    for y in y0..y0 + crop_h {
+        let start = (y * w + x0) * 4;
+        out.extend_from_slice(&image.pixels[start..start + crop_w * 4]);
+    }
+    Raster {
+        width: crop_w,
+        height: crop_h,
+        pixels: out,
+    }
 }
 
 /// Area-average downscale (box filter): the right choice for both flat art
 /// (preserves color blocks) and photos. Transparent pixels composite over
 /// white, so transparent-background PNGs behave like the sticker art they
 /// usually are.
-fn area_resize(image: &image::RgbaImage, out_w: usize, out_h: usize) -> image::RgbaImage {
-    let (src_w, src_h) = (image.width() as usize, image.height() as usize);
-    let mut out = image::RgbaImage::new(out_w as u32, out_h as u32);
+fn area_resize(image: &Raster, out_w: usize, out_h: usize) -> Raster {
+    let src_w = image.width;
+    let src_h = image.height;
+    let mut out = Raster {
+        width: out_w,
+        height: out_h,
+        pixels: vec![0_u8; out_w * out_h * 4],
+    };
     for oy in 0..out_h {
         for ox in 0..out_w {
             let x0 = ox * src_w / out_w;
@@ -194,8 +238,7 @@ fn area_resize(image: &image::RgbaImage, out_w: usize, out_h: usize) -> image::R
             let (mut red, mut green, mut blue, mut n) = (0_u64, 0_u64, 0_u64, 0_u64);
             for y in y0..y1 {
                 for x in x0..x1 {
-                    let p = image.get_pixel(x as u32, y as u32);
-                    let [pr, pg, pb, pa] = p.0;
+                    let [pr, pg, pb, pa] = image.pixel(x, y);
                     let a = u64::from(pa);
                     red += (u64::from(pr) * a + 255 * (255 - a)) / 255;
                     green += (u64::from(pg) * a + 255 * (255 - a)) / 255;
@@ -203,10 +246,10 @@ fn area_resize(image: &image::RgbaImage, out_w: usize, out_h: usize) -> image::R
                     n += 1;
                 }
             }
-            out.put_pixel(
-                ox as u32,
-                oy as u32,
-                image::Rgba([(red / n) as u8, (green / n) as u8, (blue / n) as u8, 255]),
+            out.put(
+                ox,
+                oy,
+                [(red / n) as u8, (green / n) as u8, (blue / n) as u8, 255],
             );
         }
     }
@@ -215,26 +258,25 @@ fn area_resize(image: &image::RgbaImage, out_w: usize, out_h: usize) -> image::R
 
 /// In-place brightness / contrast / saturation adjustment (in that order,
 /// contrast pivoting around the image's mean luminance).
-fn adjust_colors(image: &mut image::RgbaImage, options: &Options) {
+fn adjust_colors(image: &mut Raster, options: &Options) {
     let neutral = |x: f64| (x - 1.0).abs() < f64::EPSILON;
     if neutral(options.saturation) && neutral(options.contrast) && options.brightness == 0 {
         return;
     }
     let mean = {
         let (mut sum, mut n) = (0.0_f64, 0.0_f64);
-        for p in image.pixels() {
-            sum += luminance(p.0[0], p.0[1], p.0[2]);
+        for rgba in image.pixels.as_chunks::<4>().0 {
+            sum += luminance(rgba[0], rgba[1], rgba[2]);
             n += 1.0;
         }
         sum / n.max(1.0)
     };
-    for p in image.pixels_mut() {
+    for rgba in image.pixels.as_chunks_mut::<4>().0 {
         // Brightness → contrast (around the mean luminance) → saturation
         // (around the pixel's own luminance), computed per pixel so the
         // saturation pivot is the actual gray level of that pixel.
-        let rgb = &mut p.0[..3];
-        let original_lum = luminance(rgb[0], rgb[1], rgb[2]);
-        for c in rgb.iter_mut() {
+        let original_lum = luminance(rgba[0], rgba[1], rgba[2]);
+        for c in &mut rgba[..3] {
             let x = (f64::from(*c) + f64::from(options.brightness)).clamp(0.0, 255.0);
             let x = (mean + (x - mean) * options.contrast).clamp(0.0, 255.0);
             let x = original_lum + (x - original_lum) * options.saturation;
@@ -251,20 +293,20 @@ fn luminance(r: u8, g: u8, b: u8) -> f64 {
 /// Threshold ΔE ≈ 7 from white: softly-lit illustration paper counts as
 /// background, the panda's white belly (shaded, near #f0ece4) mostly
 /// survives. Runs only when requested.
-fn force_background(image: &mut image::RgbaImage) {
+fn force_background(image: &mut Raster) {
     let white = Lab {
         l: 100.0,
         a: 0.0,
         b: 0.0,
     };
-    for p in image.pixels_mut() {
-        if p.0[3] < 32 {
-            *p = image::Rgba([255, 255, 255, 255]);
+    for rgba in image.pixels.as_chunks_mut::<4>().0 {
+        if rgba[3] < 32 {
+            *rgba = [255, 255, 255, 255];
             continue;
         }
-        let lab = Srgb::new(p.0[0], p.0[1], p.0[2]).to_lab();
+        let lab = Srgb::new(rgba[0], rgba[1], rgba[2]).to_lab();
         if delta_e_2000(&lab, &white) < 7.0 {
-            *p = image::Rgba([255, 255, 255, 255]);
+            *rgba = [255, 255, 255, 255];
         }
     }
 }
@@ -471,11 +513,19 @@ mod tests {
         }
     }
 
+    fn solid(w: usize, h: usize, rgba: [u8; 4]) -> Raster {
+        Raster {
+            width: w,
+            height: h,
+            pixels: rgba.iter().copied().cycle().take(w * h * 4).collect(),
+        }
+    }
+
     #[test]
     fn solid_image_maps_to_nearest_single_color() {
         // A 64×64 mid-gray image: L* ≈ 53.6 sits between Light Bluish
         // Gray (≈66) and Dark Bluish Gray (≈45), nearer the latter.
-        let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([128, 128, 128, 255]));
+        let image = solid(64, 64, [128, 128, 128, 255]);
         let mosaic = convert(&image, MOSAIC_MAKER, &options(8, 8));
         assert!(
             mosaic.grid.iter().all(|&i| i == 2),
@@ -486,10 +536,13 @@ mod tests {
 
     #[test]
     fn white_background_stays_white() {
-        let mut image = image::RgbaImage::from_pixel(64, 64, image::Rgba([253, 253, 251, 255]));
+        let mut image = solid(64, 64, [253, 253, 251, 255]);
         // A dark blob in the middle.
-        let blob = image::RgbaImage::from_pixel(20, 20, image::Rgba([20, 20, 20, 255]));
-        image::imageops::overlay(&mut image, &blob, 22, 22);
+        for y in 22..42 {
+            for x in 22..42 {
+                image.put(x, y, [20, 20, 20, 255]);
+            }
+        }
         let mosaic = convert(&image, MOSAIC_MAKER, &options(8, 8));
         // Corners (background) are White (index 0); center is dark.
         assert_eq!(mosaic.grid[0], 0);
@@ -501,7 +554,7 @@ mod tests {
     #[test]
     fn crop_to_aspect_never_stretches() {
         // 128×64 image into a square grid: a centered 64×64 crop.
-        let image = image::RgbaImage::from_pixel(128, 64, image::Rgba([0, 0, 0, 255]));
+        let image = solid(128, 64, [0, 0, 0, 255]);
         let mosaic = convert(&image, MOSAIC_MAKER, &options(16, 16));
         assert_eq!(mosaic.width, 16);
         assert_eq!(mosaic.grid.len(), 16 * 16);
@@ -510,7 +563,7 @@ mod tests {
     #[test]
     fn excluded_palette_still_converts() {
         // Excluding everything falls back to the first color.
-        let image = image::RgbaImage::from_pixel(16, 16, image::Rgba([90, 90, 90, 255]));
+        let image = solid(16, 16, [90, 90, 90, 255]);
         let opts = Options {
             excluded: (0..MOSAIC_MAKER.len()).collect(),
             ..options(4, 4)
@@ -524,10 +577,16 @@ mod tests {
     fn dither_spreads_error_on_gradient() {
         // A horizontal black→white gradient; dithering must mix indices
         // rather than produce a single flat band per row.
-        let mut image = image::RgbaImage::new(128, 128);
-        for (x, _y, p) in image.enumerate_pixels_mut() {
-            let v = (x * 255 / 127).min(255) as u8;
-            *p = image::Rgba([v, v, v, 255]);
+        let mut image = Raster {
+            width: 128,
+            height: 128,
+            pixels: Vec::new(),
+        };
+        for _y in 0..128 {
+            for x in 0..128 {
+                let v = (x * 255 / 127).min(255) as u8;
+                image.pixels.extend_from_slice(&[v, v, v, 255]);
+            }
         }
         let opts = Options {
             dither: true,
@@ -546,7 +605,7 @@ mod tests {
         // A very pale pink: with the default saturation boost it should
         // land on White anyway (it is near-white), but a strong pink must
         // not map to White, and the boost must not change that direction.
-        let image = image::RgbaImage::from_pixel(32, 32, image::Rgba([244, 200, 208, 255]));
+        let image = solid(32, 32, [244, 200, 208, 255]);
         let boosted = Options {
             saturation: 2.0,
             white_background: false,
@@ -564,7 +623,7 @@ mod tests {
 
     #[test]
     fn transparent_pixels_composite_over_white() {
-        let image = image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 0, 0, 0]));
+        let image = solid(32, 32, [0, 0, 0, 0]);
         let mosaic = convert(&image, MOSAIC_MAKER, &options(4, 4));
         assert!(mosaic
             .grid
