@@ -291,8 +291,8 @@ fn despeckle(grid: &mut [usize], width: usize, height: usize) {
                         if (dx == 0 && dy == 0)
                             || (gx == 0 && dx < 0)
                             || (gy == 0 && dy < 0)
-                            || gx + dx as usize >= width
-                            || gy + dy as usize >= height
+                            || gx as i32 + dx >= width as i32
+                            || gy as i32 + dy >= height as i32
                         {
                             continue;
                         }
