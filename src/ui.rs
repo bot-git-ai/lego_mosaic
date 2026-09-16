@@ -1,13 +1,9 @@
 // Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 // AGPL License
 
-//! The web UI: one static page. All conversion logic lives in the wasm
-//! module — the page instantiates it, decodes the chosen picture on a
-//! canvas and calls the exported `convert`. Palette metadata also comes
-//! from the module, so no colors or defaults are duplicated in the HTML.
+//! Static, responsive shell for the Rust browser application. The only
+//! handwritten JavaScript imports wasm-bindgen's generated module loader.
 
-/// The full page. Vanilla JS, no build step, nothing server-generated —
-/// one fixed string.
 pub(crate) fn page() -> String {
     include_str!("ui.html").to_string()
 }
@@ -17,11 +13,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn page_is_complete_html_and_loads_the_module() {
+    fn page_loads_generated_bindings_not_a_manual_wasm_abi() {
         let page = page();
         assert!(page.contains("<!DOCTYPE html>"));
-        assert!(page.contains("mosaic.wasm"));
-        assert!(!page.contains("api/convert"), "no server API calls");
-        assert!(page.contains("instantiateStreaming"));
+        assert!(page.contains("<script type=\"module\">"));
+        assert!(page.contains("import('./mosaic.js')"));
+        assert_eq!(page.matches("<script").count(), 1);
+        for obsolete in [
+            "instantiateStreaming",
+            "alloc_buf",
+            "wasm.exports",
+            "api/convert",
+            "fetch(",
+        ] {
+            assert!(!page.contains(obsolete), "no {obsolete} in static shell");
+        }
+    }
+
+    #[test]
+    fn page_has_accessible_local_input_and_build_outputs() {
+        let page = page();
+        for id in [
+            "image",
+            "drop",
+            "original",
+            "mosaic-image",
+            "status",
+            "error",
+            "exclusions",
+            "parts",
+            "rows",
+            "export-svg",
+            "export-csv",
+            "print",
+            "zoom",
+            "reset",
+        ] {
+            assert!(page.contains(&format!("id=\"{id}\"")), "missing {id}");
+        }
+        assert!(page.contains("aria-live=\"polite\""));
+        assert!(page.contains("@media print"));
     }
 }
