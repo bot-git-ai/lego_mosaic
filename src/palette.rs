@@ -95,14 +95,6 @@ pub(crate) fn all() -> &'static [(&'static str, &'static str, &'static [TileColo
     ]
 }
 
-/// Look up a palette by id; unknown ids fall back to the default.
-pub(crate) fn by_id(id: &str) -> &'static [TileColor] {
-    all()
-        .iter()
-        .find(|(pid, _, _)| *pid == id)
-        .map_or(MOSAIC_MAKER, |(_, _, tiles)| tiles)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,8 +111,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_id_falls_back_to_default() {
-        assert_eq!(by_id("nope"), MOSAIC_MAKER);
-        assert_eq!(by_id("extended"), EXTENDED);
+    fn ids_are_unique() {
+        let ids: std::collections::HashSet<_> = all().iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ids.len(), all().len());
     }
 }

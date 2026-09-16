@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LEGO Mosaic Maker</title>
+<style>
+  :root { --bg:#f4f2ec; --card:#fff; --ink:#1c1c1c; --accent:#d01012; --line:#e2ded4; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { background:var(--accent); color:#fff; padding:14px 20px; }
+  header h1 { margin:0; font-size:20px; font-weight:700; letter-spacing:.3px; }
+  header p { margin:2px 0 0; opacity:.85; font-size:13px; }
+  main { max-width:1100px; margin:20px auto; padding:0 16px;
+         display:grid; grid-template-columns:340px 1fr; gap:20px; }
+  @media (max-width:800px) { main { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:16px; }
+  label { display:block; margin:10px 0 2px; font-weight:600; font-size:13px; }
+  select, input[type=number] { width:100%; padding:7px 8px; border:1px solid var(--line);
+          border-radius:6px; font:inherit; background:#fff; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  input[type=range] { width:100%; }
+  .check { display:flex; align-items:center; gap:8px; margin-top:10px; font-weight:400; }
+  .check input { width:auto; }
+  button { margin-top:16px; width:100%; padding:11px; font:inherit; font-weight:700;
+            background:var(--accent); color:#fff; border:0; border-radius:8px;
+            cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .hint { font-size:12px; color:#777; margin-top:4px; }
+  #result { display:none; }
+  #preview svg { width:100%; height:auto; border-radius:6px;
+                  box-shadow:0 2px 10px rgba(0,0,0,.12); image-rendering:auto; }
+  h2 { font-size:16px; margin:18px 0 8px; }
+  .parts { display:flex; flex-wrap:wrap; gap:8px; }
+  .part { display:flex; align-items:center; gap:7px; border:1px solid var(--line);
+           border-radius:20px; padding:4px 12px 4px 5px; font-size:13px; }
+  .dot { width:20px; height:20px; border-radius:50%; border:1px solid rgba(0,0,0,.15); }
+  table { border-collapse:collapse; font-size:12px; width:100%; }
+  td { border:1px solid var(--line); padding:0; }
+  td span { display:block; width:26px; height:26px; }
+  .rows-note { font-size:12px; color:#777; }
+  #error { color:var(--accent); display:none; margin-top:10px; font-weight:600; }
+  .drop { border:2px dashed var(--line); border-radius:8px; padding:14px; text-align:center;
+           cursor:pointer; }
+  .drop.has-file { border-color:var(--accent); }
+  #filename { font-size:12px; color:#777; }
+  #status { font-size:12px; color:#777; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LEGO Mosaic Maker</h1>
+  <p>Picture → round-plate mosaic, with parts list &amp; build rows — runs entirely in your browser</p>
+</header>
+<main>
+  <div class="card">
+    <form id="form">
+      <div class="drop" id="drop">
+        <strong>Choose a picture</strong><br>or drop it here
+        <input type="file" id="image" name="image" accept="image/*" hidden>
+        <div id="filename"></div>
+      </div>
+
+      <label for="palette">Palette</label>
+      <select id="palette" name="palette"></select>
+
+      <label for="size">Size (studs)</label>
+      <select id="size" name="size">
+        <option value="32">32 × 32</option>
+        <option value="48" selected>48 × 48</option>
+        <option value="64">64 × 64</option>
+        <option value="96">96 × 96</option>
+      </select>
+
+      <label for="order">Matching</label>
+      <select id="order" name="order">
+        <option value="sharp" selected>Sharp (flat art) — quantize, then vote per stud</option>
+        <option value="smooth">Smooth (photos) — average per stud</option>
+      </select>
+
+      <label for="saturation">Saturation ×<span id="sat_v">1.15</span></label>
+      <input type="range" id="saturation" name="saturation" min="1" max="3" step="0.05" value="1.15">
+      <div class="hint">Low palettes wash pastels out — a boost helps.</div>
+
+      <label for="contrast">Contrast ×<span id="con_v">1.05</span></label>
+      <input type="range" id="contrast" name="contrast" min="0.7" max="1.8" step="0.05" value="1.05">
+
+      <label class="check"><input type="checkbox" id="dither" name="dither"> Dither (gradients / photos)</label>
+      <label class="check"><input type="checkbox" id="white_background" name="white_background" checked>
+        Force white background</label>
+      <div class="hint">Keeps cut-out illustrations clean; uncheck for photos.</div>
+
+      <div id="exclusions"></div>
+
+      <button type="submit" id="go">Build mosaic</button>
+      <div id="error"></div>
+    </form>
+  </div>
+
+  <div class="card" id="result">
+    <h2 style="margin-top:0">Preview <span class="hint" id="gridnote"></span></h2>
+    <div id="preview"></div>
+    <h2>Parts needed</h2>
+    <div class="parts" id="parts"></div>
+    <h2>Build rows</h2>
+    <div class="rows-note">Row 1 = bottom of the mosaic. Follow bottom-up.</div>
+    <div id="rows" style="overflow-x:auto"></div>
+  </div>
+</main>
+<script>
+"use strict";
+const form = document.getElementById("form");
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("image");
+const errorBox = document.getElementById("error");
+let file = null;
+let wasm = null;
+
+// ---------- wasm glue ----------
+// Zero-dependency module: strings come back through a single output slot
+// (output_ptr / output_len), buffers are alloc_buf / drop_buf.
+
+function readOutput() {
+  const len = wasm.exports.output_len();
+  if (len === 0) return null;
+  const bytes = new Uint8Array(
+    wasm.exports.memory.buffer, wasm.exports.output_ptr(), len);
+  const text = new TextDecoder().decode(bytes);
+  return JSON.parse(text);
+}
+
+function allocBytes(bytes) {
+  const ptr = wasm.exports.alloc_buf(bytes.length);
+  new Uint8Array(wasm.exports.memory.buffer, ptr, bytes.length).set(bytes);
+  return { ptr, len: bytes.length };
+}
+
+function dropBuf(buf) { wasm.exports.drop_buf(buf.ptr, buf.len); }
+
+function writeStr(str) {
+  return allocBytes(new TextEncoder().encode(str));
+}
+
+function readU32s(ptr, len) { return new Uint32Array(wasm.exports.memory.buffer, ptr, len); }
+
+function u32sBuf(values) {
+  const arr = new Uint32Array(values);
+  return allocBytes(new Uint8Array(arr.buffer));
+}
+
+async function initWasm() {
+  const res = await fetch("mosaic.wasm");
+  if (!res.ok) throw new Error("cannot load mosaic.wasm: " + res.status);
+  wasm = await WebAssembly.instantiateStreaming(res, {});
+  const p = wasm.exports.palettes_json();
+  void p;
+  const palettes = readOutput();
+  if (!palettes) throw new Error("module produced no palettes");
+  const d = readDefaults();
+  renderPaletteOptions(palettes, d);
+}
+
+function readDefaults() {
+  wasm.exports.defaults_json();
+  const d = readOutput();
+  return d || {};
+}
+
+function renderPaletteOptions(palettes, defaults) {
+  const sel = document.getElementById("palette");
+  sel.innerHTML = "";
+  for (const [id, label] of palettes) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = label;
+    if (id === "mosaic-maker") opt.selected = true;
+    sel.appendChild(opt);
+  }
+  if (defaults.saturation) {
+    document.getElementById("saturation").value = defaults.saturation;
+    document.getElementById("sat_v").textContent = Number(defaults.saturation).toFixed(2);
+  }
+  if (defaults.contrast) {
+    document.getElementById("contrast").value = defaults.contrast;
+    document.getElementById("con_v").textContent = Number(defaults.contrast).toFixed(2);
+  }
+  if (defaults.order) document.getElementById("order").value = defaults.order;
+  if (typeof defaults.dither === "boolean")
+    document.getElementById("dither").checked = defaults.dither;
+  if (typeof defaults.whiteBackground === "boolean")
+    document.getElementById("white_background").checked = defaults.whiteBackground;
+  window.paletteSwatches = Object.fromEntries(
+    palettes.map(([id, , tiles]) => [id, tiles]));
+}
+
+// ---------- file picking ----------
+function pickFile(f) {
+  if (!f || !f.type.startsWith("image/")) return;
+  file = f;
+  document.getElementById("filename").textContent = f.name + " (" + Math.round(f.size/1024) + " kB)";
+  drop.classList.add("has-file");
+}
+fileInput.addEventListener("change", () => pickFile(fileInput.files[0]));
+drop.addEventListener("click", e => {
+  if (e.target === fileInput) return; // synthetic click from .click() bubbling up
+  fileInput.click();
+});
+drop.addEventListener("dragover", e => { e.preventDefault(); });
+drop.addEventListener("drop", e => {
+  e.preventDefault();
+  pickFile(e.dataTransfer.files[0]);
+});
+document.getElementById("saturation").addEventListener("input", e =>
+  document.getElementById("sat_v").textContent = Number(e.target.value).toFixed(2));
+document.getElementById("contrast").addEventListener("input", e =>
+  document.getElementById("con_v").textContent = Number(e.target.value).toFixed(2));
+
+// ---------- exclusions ----------
+function renderExclusions() {
+  const box = document.getElementById("exclusions");
+  box.innerHTML = "";
+  const tiles = (window.paletteSwatches || {})[document.getElementById("palette").value] || [];
+  tiles.forEach(([name, hex], index) => {
+    const label = document.createElement("label");
+    label.className = "check";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = true;
+    cb.addEventListener("change", renderExclusions);
+    label.appendChild(cb);
+    const dot = document.createElement("span");
+    dot.className = "dot"; dot.style.background = hex;
+    label.appendChild(dot);
+    label.appendChild(document.createTextNode(" " + name));
+    box.appendChild(label);
+    cb.dataset.index = index;
+  });
+}
+document.getElementById("palette").addEventListener("change", renderExclusions);
+
+// ---------- decode to raw RGBA ----------
+async function decodeImage(fileObj) {
+  const bitmap = await createImageBitmap(fileObj);
+  // Cap the decode size: downscaling here would blur detail the sharp
+  // matcher wants, so only guard against absurdly large uploads.
+  const maxSide = 4096;
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  bitmap.close();
+  return { data, width: w, height: h };
+}
+
+// ---------- the conversion, fully client-side ----------
+form.addEventListener("submit", async e => {
+  e.preventDefault();
+  errorBox.style.display = "none";
+  if (!file) {
+    errorBox.textContent = "Choose a picture first.";
+    errorBox.style.display = "block";
+    return;
+  }
+  if (!wasm) {
+    errorBox.textContent = "Still loading the converter — try again in a second.";
+    errorBox.style.display = "block";
+    return;
+  }
+  const go = document.getElementById("go");
+  go.disabled = true; go.textContent = "Building…";
+  try {
+    const { data, width, height } = await decodeImage(file);
+    const pixels = allocBytes(data);
+    const paletteId = writeStr(document.getElementById("palette").value);
+    const order = writeStr(document.getElementById("order").value);
+    const excluded = [];
+    document.querySelectorAll("#exclusions input").forEach(cb => {
+      if (!cb.checked) excluded.push(Number(cb.dataset.index));
+    });
+    const excludedBuf = u32sBuf(excluded);
+    const grid = Number(document.getElementById("size").value);
+    const saturation = Math.round(Number(document.getElementById("saturation").value) * 1000);
+    const contrast = Math.round(Number(document.getElementById("contrast").value) * 1000);
+    const dither = document.getElementById("dither").checked ? 1 : 0;
+    const whiteBg = document.getElementById("white_background").checked ? 1 : 0;
+    try {
+      wasm.exports.convert(
+        pixels.ptr, width, height, grid,
+        paletteId.ptr, paletteId.len,
+        order.ptr, order.len,
+        saturation, contrast,
+        dither, whiteBg,
+        excludedBuf.ptr, excluded.length
+      );
+    } finally {
+      dropBuf(pixels); dropBuf(paletteId); dropBuf(order); dropBuf(excludedBuf);
+    }
+    const result = readOutput();
+    if (!result) throw new Error("conversion failed");
+    if (result.error) throw new Error(result.error);
+    showResult(result);
+  } catch (err) {
+    errorBox.textContent = "Conversion failed: " + (err && err.message ? err.message : err);
+    errorBox.style.display = "block";
+  } finally {
+    go.disabled = false; go.textContent = "Build mosaic";
+  }
+});
+
+function showResult(result) {
+  document.getElementById("preview").innerHTML = result.svg;
+  document.getElementById("gridnote").textContent =
+    result.width + " × " + result.height + " studs, " +
+    result.tiles.toLocaleString() + " tiles";
+  const parts = document.getElementById("parts");
+  parts.innerHTML = "";
+  for (const p of result.parts) {
+    const el = document.createElement("div");
+    el.className = "part";
+    el.innerHTML = '<span class="dot" style="background:' + p.hex + '"></span>' +
+      p.count.toLocaleString() + " × " + p.name;
+    parts.appendChild(el);
+  }
+  const rows = document.getElementById("rows");
+  let html = "<table>";
+  result.rows.forEach(row => {
+    html += "<tr>";
+    row.forEach(cell => {
+      html += '<td title="' + cell[0] + '"><span style="background:' + cell[1] +
+              '"></span></td>';
+    });
+    html += "</tr>";
+  });
+  html += "</table>";
+  rows.innerHTML = html;
+  const resultCard = document.getElementById("result");
+  resultCard.style.display = "block";
+  resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+initWasm().then(renderExclusions).catch(err => {
+  errorBox.textContent = "Converter failed to load: " + (err && err.message ? err.message : err);
+  errorBox.style.display = "block";
+});
+</script>
+</body>
+</html>

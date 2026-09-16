@@ -2,22 +2,26 @@
 # AGPL License
 [package]
 name = "lego-mosaic"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "LEGO Mosaic Maker: picture-to-mosaic converter web app"
+
+# The conversion core (`src/lib.rs` and friends) compiles to a
+# zero-dependency wasm module that runs in the browser; the `lego-mosaic`
+# binary is only a static file server for the page and the module. Build
+# both targets:
+#   cargo build                      (host: the server binary, `co` gate)
+#   cargo build --target wasm32-unknown-unknown --release  (the module)
+[lib]
+name = "lego_mosaic"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
 
 [[bin]]
 name = "lego-mosaic"
 path = "src/main.rs"
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-    "gif",
-    "webp",
-] }
-base64 = "0.23"
 
 # Deny warnings on every rustc invocation (plain `cargo build` too), matching
 # the monorepo convention.

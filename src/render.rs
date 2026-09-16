@@ -142,12 +142,20 @@ pub(crate) fn build_rows(mosaic: &Mosaic) -> Vec<Vec<(String, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mosaic::{convert, Options};
+    use crate::mosaic::{convert, Options, Raster};
     use crate::palette::MOSAIC_MAKER;
+
+    fn solid(w: usize, h: usize, rgba: [u8; 4]) -> Raster {
+        Raster {
+            width: w,
+            height: h,
+            pixels: rgba.iter().copied().cycle().take(w * h * 4).collect(),
+        }
+    }
 
     #[test]
     fn svg_contains_every_stud_and_correct_dimensions() {
-        let image = image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 10, 10, 255]));
+        let image = solid(32, 32, [10, 10, 10, 255]);
         let mosaic = convert(
             &image,
             MOSAIC_MAKER,
@@ -169,7 +177,7 @@ mod tests {
 
     #[test]
     fn parts_list_totals_the_grid() {
-        let image = image::RgbaImage::from_pixel(32, 32, image::Rgba([128, 128, 128, 255]));
+        let image = solid(32, 32, [128, 128, 128, 255]);
         let mosaic = convert(
             &image,
             MOSAIC_MAKER,
@@ -186,11 +194,11 @@ mod tests {
 
     #[test]
     fn build_rows_are_bottom_up() {
-        let mut image = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 255, 255, 255]));
         // Bottom half black, top half white.
-        for (_x, y, p) in image.enumerate_pixels_mut() {
-            if y >= 8 {
-                *p = image::Rgba([0, 0, 0, 255]);
+        let mut image = solid(16, 16, [255, 255, 255, 255]);
+        for y in 8..16 {
+            for x in 0..16 {
+                image.put(x, y, [0, 0, 0, 255]);
             }
         }
         let mosaic = convert(

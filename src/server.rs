@@ -3,22 +3,19 @@
 
 //! Minimal HTTP/1.1 server: a buffered request reader and response
 //! writer, mirroring the style of bot-web's `http` module but
-//! self-contained. Only what this app needs: GET/POST with either raw
-//! bodies (JSON) or multipart/form-data uploads (the image).
+//! self-contained. Only what this app needs: GETs of static assets — the
+//! conversion itself runs client-side in the wasm module.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
 /// Requests are images or small forms; 25 MB matches bot-web's upload cap.
-const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
 const MAX_HEAD_BYTES: usize = 32 * 1024;
 const HEAD_SEPARATOR: &[u8] = b"\r\n\r\n";
 
 pub(crate) struct Request {
     pub(crate) method: String,
     pub(crate) path: String,
-    pub(crate) body: Vec<u8>,
-    pub(crate) content_type: Option<String>,
 }
 
 pub(crate) struct Response {
@@ -32,14 +29,6 @@ impl Response {
         Self {
             status,
             content_type: "text/plain; charset=utf-8",
-            body: body.into().into_bytes(),
-        }
-    }
-
-    pub(crate) fn json(status: u16, body: impl Into<String>) -> Self {
-        Self {
-            status,
-            content_type: "application/json",
             body: body.into().into_bytes(),
         }
     }
@@ -77,11 +66,13 @@ pub(crate) fn respond(stream: &mut impl Write, response: &Response) -> std::io::
     stream.write_all(&response.body)
 }
 
-/// Read one request. `Ok(None)` means the client hung up or sent garbage —
-/// just close. Oversized bodies still get a 413 response.
+/// Read one request line set. `Ok(None)` means the client hung up or sent
+/// garbage — just close. This server only serves GETs: headers are parsed,
+/// bodies are never read.
 pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8192];
+    // Read until the end of the headers; the (empty) body is ignored.
     let head_len = loop {
         if let Some(position) = find(&buffer, HEAD_SEPARATOR) {
             break position + HEAD_SEPARATOR.len();
@@ -105,34 +96,9 @@ pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Req
         return Ok(None);
     };
     let path = path_full.split('?').next().unwrap_or_default().to_string();
-    let content_type = head
-        .lines()
-        .find_map(|line| line.strip_prefix("Content-Type: "))
-        .map(str::to_string);
-    let content_length = head
-        .lines()
-        .find_map(|line| line.strip_prefix("Content-Length: "))
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
-    if content_length > MAX_BODY_BYTES {
-        let _ = respond(stream, &Response::text(413, "request too large\n"));
-        return Ok(None);
-    }
-    let mut body = buffer;
-    body.drain(..head_len);
-    while body.len() < content_length {
-        let count = stream.read(&mut chunk)?;
-        if count == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..count]);
-    }
-    body.truncate(content_length);
     Ok(Some(Request {
         method: method.to_string(),
         path,
-        body,
-        content_type,
     }))
 }
 
