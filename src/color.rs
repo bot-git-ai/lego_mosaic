@@ -14,25 +14,25 @@ const WHITE_Z: f64 = 1.088_83;
 
 /// A color in linear-sRGB-independent sRGB space (0–255 components).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Srgb {
-    pub(crate) r: u8,
-    pub(crate) g: u8,
-    pub(crate) b: u8,
+pub struct Srgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
 }
 
 impl Srgb {
-    pub(crate) const fn new(r: u8, g: u8, b: u8) -> Self {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
 
     /// Hex string for HTML output (`#f2f3f2`).
-    pub(crate) fn hex(self) -> String {
+    pub fn hex(self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
     }
 
     /// sRGB → CIELAB (D65 reference white), following the classic pipeline:
     /// inverse companding → linear RGB → XYZ (D65) → Lab.
-    pub(crate) fn to_lab(self) -> Lab {
+    pub fn to_lab(self) -> Lab {
         let [lr, lg, lb] = [
             inverse_compand(f64::from(self.r) / 255.0),
             inverse_compand(f64::from(self.g) / 255.0),
@@ -55,10 +55,10 @@ impl Srgb {
 
 /// CIELAB color (D65).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Lab {
-    pub(crate) l: f64,
-    pub(crate) a: f64,
-    pub(crate) b: f64,
+pub struct Lab {
+    pub l: f64,
+    pub a: f64,
+    pub b: f64,
 }
 
 /// Inverse sRGB companding: monitor-encoded 0–1 → linear light 0–1.
@@ -83,7 +83,7 @@ fn f(t: f64) -> f64 {
 /// CIEDE2000 color difference between two Lab colors. With a tiny palette
 /// CIE76 would give nearly the same nearest-neighbor verdicts, but 2000 is
 /// cheap and correct near the hue discontinuities (skin tones, pastels).
-pub(crate) fn delta_e_2000(lab1: &Lab, lab2: &Lab) -> f64 {
+pub fn delta_e_2000(lab1: &Lab, lab2: &Lab) -> f64 {
     let (l1, a1, b1) = (lab1.l, lab1.a, lab1.b);
     let (l2, a2, b2) = (lab2.l, lab2.a, lab2.b);
 

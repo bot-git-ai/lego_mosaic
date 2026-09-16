@@ -5,6 +5,7 @@
 //! Images never leave the browser. Routes here are prefix-free; gateway
 //! mounts the app at `/lego-mosaic/` and strips that prefix.
 
+mod cli;
 mod server;
 mod ui;
 
@@ -28,6 +29,23 @@ const WASM: &[u8] = include_bytes!("../assets/mosaic_bg.wasm");
 const BINDINGS: &str = include_str!("../assets/mosaic.js");
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() && args != ["serve"] {
+        if args == ["--help"] || args == ["-h"] {
+            println!("{}", cli::help());
+            return;
+        }
+        let result = if args[0] == "convert" {
+            cli::run(&args[1..])
+        } else {
+            Err(format!("Unknown command: {}\n{}", args[0], cli::help()))
+        };
+        if let Err(error) = result {
+            eprintln!("lego-mosaic: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let addr = std::env::var("LEGO_MOSAIC_ADDR").unwrap_or_else(|_| "127.0.0.1:3210".into());
     let listener = TcpListener::bind(&addr).unwrap_or_else(|error| {
         eprintln!("lego-mosaic: cannot bind {addr}: {error}");

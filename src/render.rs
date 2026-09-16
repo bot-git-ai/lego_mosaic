@@ -18,7 +18,7 @@ use crate::mosaic::Mosaic;
 /// Round-tile preview. `stud` is the tile diameter in px. Small neutral
 /// gaps and a subtle rim depict a smooth round TILE, not a square plate
 /// with an oversized bright stud. Tile faces retain the exact palette RGB.
-pub(crate) fn stud_svg(mosaic: &Mosaic, stud: u32) -> String {
+pub fn stud_svg(mosaic: &Mosaic, stud: u32) -> String {
     let stud = stud.clamp(2, 256);
     let pad = (stud / 8).max(1);
     let cell = stud + pad;
@@ -46,7 +46,7 @@ pub(crate) fn stud_svg(mosaic: &Mosaic, stud: u32) -> String {
 
 /// Unshaded square-cell preview, useful for judging conversion quality
 /// without gaps or simulated lighting. The final grid is never modified.
-pub(crate) fn flat_svg(mosaic: &Mosaic, cell: u32) -> String {
+pub fn flat_svg(mosaic: &Mosaic, cell: u32) -> String {
     let cell = cell.clamp(1, 256);
     let mut out = svg_start(
         mosaic.width as u32 * cell,
@@ -77,7 +77,7 @@ fn svg_start(width: u32, height: u32, title: &str) -> String {
 /// sections, including partial sections at the top/right. Color numbers
 /// remain stable even when exclusions reorder the effective palette.
 /// The caller chooses SVG download or browser print/PDF scaling/pagination.
-pub(crate) fn guide_svg(mosaic: &Mosaic, cell: u32) -> String {
+pub fn guide_svg(mosaic: &Mosaic, cell: u32) -> String {
     let cell = cell.clamp(16, 128);
     let left = cell * 2;
     let top = cell * 4;
@@ -268,7 +268,7 @@ fn xml_escape(value: &str) -> String {
 
 /// Quoted CSV fields, CRLF records and explicit unverified availability.
 /// This is a design parts count, not a stock check or an order submission.
-pub(crate) fn parts_csv(mosaic: &Mosaic) -> String {
+pub fn parts_csv(mosaic: &Mosaic) -> String {
     let mut out =
         String::from("Color ID,Symbol,Color,Hex,Quantity,Part,Description,Availability\r\n");
     for part in parts_list(mosaic) {
@@ -298,14 +298,14 @@ pub(crate) fn parts_csv(mosaic: &Mosaic) -> String {
 }
 
 /// One row of the parts list: color, count.
-pub(crate) struct PartCount {
-    pub(crate) name: String,
-    pub(crate) hex: String,
-    pub(crate) count: usize,
+pub struct PartCount {
+    pub name: String,
+    pub hex: String,
+    pub count: usize,
 }
 
 /// Aggregate the grid into per-color counts, sorted by count descending.
-pub(crate) fn parts_list(mosaic: &Mosaic) -> Vec<PartCount> {
+pub fn parts_list(mosaic: &Mosaic) -> Vec<PartCount> {
     let mut counts = vec![0_usize; mosaic.palette.len()];
     for &index in &mosaic.grid {
         counts[index] += 1;
@@ -328,7 +328,7 @@ pub(crate) fn parts_list(mosaic: &Mosaic) -> Vec<PartCount> {
 /// The grid as rows of color names — the build instruction rows, matching
 /// what the builder places stud by stud from bottom to top (like LEGO
 /// instructions, row 1 is the bottom of the mosaic).
-pub(crate) fn build_rows(mosaic: &Mosaic) -> Vec<Vec<(String, String)>> {
+pub fn build_rows(mosaic: &Mosaic) -> Vec<Vec<(String, String)>> {
     let mut rows = Vec::with_capacity(mosaic.height);
     for y in (0..mosaic.height).rev() {
         let row = (0..mosaic.width)

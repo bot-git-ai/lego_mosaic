@@ -199,6 +199,7 @@ fn update_labels() -> Result<(), JsValue> {
         "crop_x",
         "crop_y",
         "hue_strength",
+        "outline_strength",
         "neutral_cleanup",
         "dither_strength",
     ] {
@@ -246,6 +247,7 @@ fn apply_preset(state: &Shared, preset: &str, reset: bool) -> Result<(), JsValue
     let (palette_id, note) = match preset {
         "photo" => {
             options.order = Order::Smooth;
+            options.outline_strength = 0.0;
             options.dither = true;
             options.white_background = false;
             options.neutral_cleanup = 0.0;
@@ -259,6 +261,7 @@ fn apply_preset(state: &Shared, preset: &str, reset: bool) -> Result<(), JsValue
         }
         "grayscale" => {
             options.order = Order::Smooth;
+            options.outline_strength = 0.0;
             options.saturation = 0.0;
             options.hue_remap.mode = HueMode::Preserve;
             options.secondary_remap.mode = HueMode::Preserve;
@@ -303,6 +306,7 @@ fn apply_preset(state: &Shared, preset: &str, reset: bool) -> Result<(), JsValue
         ("contrast", options.contrast),
         ("saturation", options.saturation),
         ("gamma", options.gamma),
+        ("outline_strength", options.outline_strength),
         ("crop_x", options.crop_x),
         ("crop_y", options.crop_y),
         ("crop_zoom", options.zoom),
@@ -362,6 +366,7 @@ fn read_options(state: &Shared) -> Result<(String, Options), JsValue> {
         contrast: number("contrast")?,
         saturation: number("saturation")?,
         gamma: number("gamma")?,
+        outline_strength: number("outline_strength")?,
         crop_x: number("crop_x")?,
         crop_y: number("crop_y")?,
         zoom: number("crop_zoom")?,

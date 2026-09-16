@@ -16,3 +16,18 @@ pub(crate) mod render;
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
+
+// One public core shared by the native CLI and the Rust browser front end.
+pub use color::Srgb;
+pub use mosaic::{FitMode, HueMode, HueRemap, Mosaic, Options, Order, Raster};
+pub use palette::{all as palettes, TileColor};
+pub use render::{flat_svg, guide_svg, parts_csv, stud_svg};
+
+pub fn convert(image: &Raster, palette_id: &str, options: &Options) -> Result<Mosaic, String> {
+    let tiles = palette::all()
+        .iter()
+        .find(|p| p.0 == palette_id)
+        .ok_or_else(|| format!("Unknown palette: {palette_id}"))?
+        .2;
+    Ok(mosaic::convert(image, tiles, options))
+}
