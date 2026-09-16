@@ -13,15 +13,16 @@ fn option(value: &str, label: &str, selected: bool) -> String {
 }
 
 /// The palette swatch data the JS exclusion toggles are built from:
-/// `paletteSwatches = {id: [[name, hex, index], …], …}`.
+/// `const paletteSwatches = {"id": [[name, hex, index], …], …};`.
+/// Keys are quoted — bare `mosaic-maker` is invalid JS and would make the
+/// whole script fail to parse.
 fn palette_swatches() -> String {
-    let mut out = String::from("paletteSwatches = {");
+    let mut out = String::from("const paletteSwatches = {");
     for (i, (id, _, tiles)) in crate::palette::all().iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        out.push_str(id);
-        out.push_str(": [");
+        write!(out, "\"{id}\": [").expect("writing to String cannot fail");
         for (j, tile) in tiles.iter().enumerate() {
             if j > 0 {
                 out.push(',');
@@ -186,7 +187,6 @@ document.getElementById("contrast").addEventListener("input", e =>
   document.getElementById("con_v").textContent = Number(e.target.value).toFixed(2));
 
 // Exclusions: one toggle per color of the chosen palette.
-const paletteSwatches = {{}};
 {palette_json}
 const paletteSelect = document.getElementById("palette");
 function renderExclusions() {{
