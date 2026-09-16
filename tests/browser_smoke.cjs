@@ -2,7 +2,7 @@
 // PLAYWRIGHT_MODULE=/path/to/playwright-core node tests/browser_smoke.cjs [image.png]
 // Runs its own server on 3333 and always stops it. Never touches the live unit.
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright-core');
-const {spawn}=require('node:child_process');
+const {spawn,execFileSync}=require('node:child_process');
 const {once}=require('node:events');
 const fs=require('node:fs/promises');
 const os=require('node:os');
@@ -52,7 +52,11 @@ let browser;
  console.log('PASS exports, stable symbols, persistent exclusions, all-excluded guard');
  if(process.argv[2]){
   await page.locator('#image').setInputFiles(path.resolve(process.argv[2]));await ready();await build();
-  const flat=await svg();assert.match(flat,/<rect/);assert.doesNotMatch(flat,/<circle/);
+  const flat=await svg();
+  const cliSvg=path.join(artifactDir,'cli-mosaic.svg');
+  execFileSync(path.join(dir,'target/release/lego-mosaic'),['convert',path.resolve(process.argv[2]),'--output',cliSvg],{stdio:['ignore','pipe','pipe']});
+  assert.equal(await fs.readFile(cliSvg,'utf8'),flat,'CLI and browser must produce byte-identical SVG');
+  console.log('PASS CLI/browser exact SVG parity for supplied image');assert.match(flat,/<rect/);assert.doesNotMatch(flat,/<circle/);
   csv=await save('export-csv','mosaic-parts.csv');assert.match(csv,/"yellow","12"/);assert.match(csv,/"light-bluish-gray","03"/);
   console.log('PASS supplied image defaults:',await page.locator('#parts').innerText());
   await set('secondary_mode','preserve');await build();const natural=await svg();assert.notEqual(flat,natural);

@@ -18,16 +18,16 @@ use crate::palette::TileColor;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
-pub(crate) struct Raster {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
+pub struct Raster {
+    pub width: usize,
+    pub height: usize,
     /// Row-major RGBA8; transparent samples composite over white.
-    pub(crate) pixels: Vec<u8>,
+    pub pixels: Vec<u8>,
 }
 
 impl Raster {
     #[allow(dead_code)]
-    pub(crate) fn put(&mut self, x: usize, y: usize, rgba: [u8; 4]) {
+    pub fn put(&mut self, x: usize, y: usize, rgba: [u8; 4]) {
         let i = (y * self.width + x) * 4;
         self.pixels[i..i + 4].copy_from_slice(&rgba);
     }
@@ -45,33 +45,21 @@ impl Raster {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Order {
+pub enum Order {
     Sharp,
     Smooth,
 }
 
-impl Order {
-    // Retained for native/legacy callers; serde accepts only documented enum values.
-    #[allow(dead_code)]
-    pub(crate) fn from_str(s: &str) -> Self {
-        if s == "smooth" {
-            Self::Smooth
-        } else {
-            Self::Sharp
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum FitMode {
+pub enum FitMode {
     Contain,
     Crop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum HueMode {
+pub enum HueMode {
     Auto,
     Preserve,
     Grayscale,
@@ -83,13 +71,13 @@ pub(crate) enum HueMode {
 /// of the hue tolerance is feathered; interior shades share one target.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct HueRemap {
-    pub(crate) mode: HueMode,
-    pub(crate) source_hue: f64,
-    pub(crate) tolerance: f64,
-    pub(crate) threshold: f64,
-    pub(crate) strength: f64,
-    pub(crate) target: [u8; 3],
+pub struct HueRemap {
+    pub mode: HueMode,
+    pub source_hue: f64,
+    pub tolerance: f64,
+    pub threshold: f64,
+    pub strength: f64,
+    pub target: [u8; 3],
 }
 
 impl Default for HueRemap {
@@ -109,27 +97,28 @@ impl Default for HueRemap {
 /// sanitized in `convert`, not by the caller; NaN/∞ take neutral defaults.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Options {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    pub(crate) saturation: f64,
-    pub(crate) contrast: f64,
-    pub(crate) brightness: i32,
-    pub(crate) gamma: f64,
-    pub(crate) order: Order,
-    pub(crate) dither: bool,
-    pub(crate) dither_strength: f64,
-    pub(crate) white_background: bool,
-    pub(crate) neutral_cleanup: f64,
-    pub(crate) despeckle: bool,
-    pub(crate) despeckle_strength: f64,
-    pub(crate) excluded: Vec<usize>,
-    pub(crate) fit: FitMode,
-    pub(crate) crop_x: f64,
-    pub(crate) crop_y: f64,
-    pub(crate) zoom: f64,
-    pub(crate) hue_remap: HueRemap,
-    pub(crate) secondary_remap: HueRemap,
+pub struct Options {
+    pub width: usize,
+    pub height: usize,
+    pub saturation: f64,
+    pub contrast: f64,
+    pub brightness: i32,
+    pub gamma: f64,
+    pub order: Order,
+    pub outline_strength: f64,
+    pub dither: bool,
+    pub dither_strength: f64,
+    pub white_background: bool,
+    pub neutral_cleanup: f64,
+    pub despeckle: bool,
+    pub despeckle_strength: f64,
+    pub excluded: Vec<usize>,
+    pub fit: FitMode,
+    pub crop_x: f64,
+    pub crop_y: f64,
+    pub zoom: f64,
+    pub hue_remap: HueRemap,
+    pub secondary_remap: HueRemap,
 }
 
 impl Default for Options {
@@ -142,6 +131,7 @@ impl Default for Options {
             brightness: 0,
             gamma: 1.0,
             order: Order::Sharp,
+            outline_strength: 0.7,
             dither: false,
             dither_strength: 0.75,
             white_background: true,
@@ -174,6 +164,7 @@ impl Options {
         o.contrast = bounded(o.contrast, 0.25, 3.0, 1.0);
         o.brightness = o.brightness.clamp(-100, 100);
         o.gamma = bounded(o.gamma, 0.25, 4.0, 1.0);
+        o.outline_strength = bounded(o.outline_strength, 0.0, 1.0, 0.7);
         o.dither_strength = bounded(o.dither_strength, 0.0, 1.0, 0.75);
         o.neutral_cleanup = bounded(o.neutral_cleanup, 0.0, 1.0, 0.5);
         o.despeckle_strength = bounded(o.despeckle_strength, 0.0, 1.0, 0.35);
@@ -202,11 +193,11 @@ fn bounded(x: f64, lo: f64, hi: f64, default: f64) -> f64 {
     }
 }
 
-pub(crate) struct Mosaic {
-    pub(crate) grid: Vec<usize>,
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    pub(crate) palette: Vec<TileColor>,
+pub struct Mosaic {
+    pub grid: Vec<usize>,
+    pub width: usize,
+    pub height: usize,
+    pub palette: Vec<TileColor>,
 }
 
 const OVERSAMPLE: usize = 4;
@@ -216,7 +207,7 @@ const WHITE: Lab = Lab {
     b: 0.0,
 };
 
-pub(crate) fn convert(image: &Raster, palette: &[TileColor], options: &Options) -> Mosaic {
+pub fn convert(image: &Raster, palette: &[TileColor], options: &Options) -> Mosaic {
     let o = options.sanitized();
     let palette = excluded_palette(palette, &o.excluded);
     let labs: Vec<_> = palette.iter().map(|t| t.rgb.to_lab()).collect();
@@ -580,6 +571,8 @@ fn pool(
             let mut sum = [0.0; 3];
             let mut ink = 0.0;
             let mut darkest = WHITE;
+            let mut lightest: f64 = 0.0;
+            let mut dark_count = 0;
             for dy in 0..OVERSAMPLE {
                 for dx in 0..OVERSAMPLE {
                     let p = (gy * OVERSAMPLE + dy) * hi_w + gx * OVERSAMPLE + dx;
@@ -592,6 +585,10 @@ fn pool(
                     };
                     for c in 0..3 {
                         sum[c] += v[c] / n;
+                    }
+                    lightest = lightest.max(lab.l);
+                    if lab.l < 60.0 && chroma(lab) < 20.0 {
+                        dark_count += 1;
                     }
                     ink += ((50.0 - lab.l) / 35.0).clamp(0.0, 1.0) / n;
                     if lab.l < darkest.l {
@@ -628,7 +625,17 @@ fn pool(
             // A 1/4-stud black line must not disappear just because it does
             // not win a majority. Require genuinely dark coverage, not gray
             // antialias fringes. Despeckle protects this decision as well.
-            let preserve_ink = ink >= 0.19 && darkest.l < 30.0 && palette[best].l > 45.0;
+            let coverage = f64::from(dark_count) / n;
+            // Thin neutral pencil outlines often occupy much less than half a
+            // stud, but carry the subject silhouette. Keep genuine local dark
+            // contrast instead of inventing edges in flat fills or photos.
+            let line = o.outline_strength > 0.0
+                && darkest.l < 60.0
+                && chroma(darkest) < 20.0
+                && lightest - darkest.l > 18.0
+                && coverage >= 0.26 - 0.22 * o.outline_strength
+                && palette[best].l - darkest.l > 12.0;
+            let preserve_ink = (ink >= 0.19 && darkest.l < 30.0 && palette[best].l > 45.0) || line;
             if preserve_ink {
                 best = nearest(&darkest, palette);
             }
@@ -834,6 +841,38 @@ mod tests {
                 rgb: Srgb::new(247, 209, 23),
             },
         ]
+    }
+
+    #[test]
+    fn thin_gray_outline_survives_conversion_and_svg() {
+        // One source pixel in each 4x4 stud footprint: the full conversion
+        // must preserve a vertical pencil line, not only the pooling helper.
+        let mut source = solid(32, 32, [255, 255, 255, 255]);
+        for y in 0..32 {
+            source.put(13, y, [110, 110, 110, 255]);
+        }
+        let options = options(8, 8);
+        let result = convert(&source, MOSAIC_MAKER, &options);
+        let dark = result
+            .palette
+            .iter()
+            .position(|c| c.name == "Dark Bluish Gray")
+            .unwrap();
+        for y in 0..8 {
+            assert_eq!(result.grid[y * 8 + 3], dark);
+            assert_eq!(result.grid[y * 8 + 2], 0);
+            assert_eq!(result.grid[y * 8 + 4], 0);
+        }
+        let svg = crate::render::flat_svg(&result, 20);
+        assert_eq!(svg.matches("fill=\"#6c6e68\"").count(), 8);
+        let off = Options {
+            outline_strength: 0.0,
+            ..options
+        };
+        assert!(convert(&source, MOSAIC_MAKER, &off)
+            .grid
+            .iter()
+            .all(|&i| i == 0));
     }
 
     #[test]

@@ -21,6 +21,15 @@ server. No npm/JS build tool is needed. A tiny dynamic-import loader in ui.html
 and generated wasm-bindgen platform bindings are the only JavaScript in the app;
 there is no handwritten JavaScript application or raw-pointer conversion ABI.
 
+CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
+--size 64 --palette extended --preset photo --recipe o.json --save-recipe o.json
+--studs --dither --force]`, PNG/SVG output, never overwrites input or existing
+outputs without `--force`. It is a thin native I/O shell: every mosaic byte
+comes from the same public library (`lego_mosaic::convert`/`render`) the
+browser uses; `tests/browser_smoke.cjs` asserts byte-identical SVG between the
+two front ends. `tests/cli_smoke.py` checks exact expected SVG bytes via a
+2×2 PNG. `lego-mosaic serve` (or no args) runs the web server.
+
 Server: `target/release/lego-mosaic`, default `127.0.0.1:3210`, override
 `LEGO_MOSAIC_ADDR`. Unit `lego-mosaic.service`. Routes are prefix-free:
 `/`, `/mosaic.js`, `/mosaic_bg.wasm`, `/healthz`; GET only. Release with Cobalt,
@@ -43,6 +52,8 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
 - `render.rs`: exact-color flat SVG, round-tile SVG, numbered vector build guide,
   CSV, counts and bottom-up rows. All output symbols use TileColor::symbol(),
   never count-sorted or post-exclusion indices.
+- `cli.rs`: native argument parsing, image decode (bounded `image` crate),
+  output-path collision checks and atomic-ish writes; no conversion logic.
 - `browser.rs`: wasm-only Rust web-sys DOM/events, image decode/canvas, presets,
   palette exclusions, errors, original/converted previews, exports and print.
   Busy state serializes decode/build; changing settings marks old outputs stale.

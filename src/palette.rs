@@ -12,9 +12,9 @@ use crate::color::Srgb;
 
 /// One tile color: what the UI shows and the parts list counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TileColor {
-    pub(crate) name: &'static str,
-    pub(crate) rgb: Srgb,
+pub struct TileColor {
+    pub name: &'static str,
+    pub rgb: Srgb,
 }
 
 impl TileColor {
@@ -26,27 +26,27 @@ impl TileColor {
     }
 
     /// Stable app identifier, not an official LEGO or BrickLink color ID.
-    pub(crate) fn id(&self) -> String {
+    pub fn id(&self) -> String {
         self.name.to_ascii_lowercase().replace(' ', "-")
     }
 
     /// Printable app color number, stable across palettes and exclusions.
     /// Canonical extended-palette order must not be changed without migrating
     /// these symbols. New colors should be appended. Unknown colors use `?`.
-    pub(crate) fn symbol(&self) -> String {
+    pub fn symbol(&self) -> String {
         EXTENDED
             .iter()
             .position(|tile| tile.name == self.name)
             .map_or_else(|| "?".to_string(), |index| format!("{:02}", index + 1))
     }
 
-    pub(crate) fn hex(&self) -> String {
+    pub fn hex(&self) -> String {
         self.rgb.hex()
     }
 }
 
 /// The five colors of the official Mosaic Maker personalized sets.
-pub(crate) const MOSAIC_MAKER: &[TileColor] = &[
+pub const MOSAIC_MAKER: &[TileColor] = &[
     TileColor::new("White", 0xF2, 0xF3, 0xF2),
     TileColor::new("Light Bluish Gray", 0xA0, 0xA5, 0xA9),
     TileColor::new("Dark Bluish Gray", 0x6C, 0x6E, 0x68),
@@ -55,7 +55,7 @@ pub(crate) const MOSAIC_MAKER: &[TileColor] = &[
 ];
 
 /// Just the neutral ramp: white, grays, black. Good for the pixel-art look.
-pub(crate) const MONOCHROME: &[TileColor] = &[
+pub const MONOCHROME: &[TileColor] = &[
     TileColor::new("White", 0xF2, 0xF3, 0xF2),
     TileColor::new("Very Light Gray", 0xE0, 0xE0, 0xDD),
     TileColor::new("Light Bluish Gray", 0xA0, 0xA5, 0xA9),
@@ -68,7 +68,7 @@ pub(crate) const MONOCHROME: &[TileColor] = &[
 /// Part 98138 color/stock availability is NOT verified. Legacy Light Gray
 /// is distinct from Light Bluish Gray (LEGO's Medium Stone Grey); do not
 /// invent a second modern gray under the latter's alternate name.
-pub(crate) const EXTENDED: &[TileColor] = &[
+pub const EXTENDED: &[TileColor] = &[
     TileColor::new("White", 0xF2, 0xF3, 0xF2),
     TileColor::new("Very Light Gray", 0xE0, 0xE0, 0xDD),
     TileColor::new("Light Bluish Gray", 0xA0, 0xA5, 0xA9),
@@ -106,7 +106,7 @@ pub(crate) const EXTENDED: &[TileColor] = &[
 ];
 
 /// All selectable palettes, with the ids used by the API/UI.
-pub(crate) fn all() -> &'static [(&'static str, &'static str, &'static [TileColor])] {
+pub fn all() -> &'static [(&'static str, &'static str, &'static [TileColor])] {
     &[
         ("mosaic-maker", "Mosaic Maker (5)", MOSAIC_MAKER),
         ("monochrome", "Grayscale (6)", MONOCHROME),
