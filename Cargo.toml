@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
+# AGPL License
+[package]
+name = "lego-mosaic"
+version = "0.1.0"
+edition = "2021"
+description = "LEGO Mosaic Maker: picture-to-mosaic converter web app"
+
+[[bin]]
+name = "lego-mosaic"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
+base64 = "0.23"
+
+# Deny warnings on every rustc invocation (plain `cargo build` too), matching
+# the monorepo convention.
+[lints.rust]
+warnings = "deny"
+
+[profile.release]
+strip = true
