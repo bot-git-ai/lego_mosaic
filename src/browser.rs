@@ -643,7 +643,13 @@ fn show_stages(stages: &StagePayload) -> Result<(), JsValue> {
                 width,
                 height,
                 pixels,
-            } => Some((*width, *height, pixels)),
+            } => {
+                text(
+                    &format!("stage-{name}-size"),
+                    &format!("· {width} × {height} px"),
+                )?;
+                Some((*width, *height, pixels))
+            }
             StageImage::None => None,
         };
         match raster_data_url(raster.as_ref())? {
