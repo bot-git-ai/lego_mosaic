@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 pub fn help() -> &'static str {
     "LEGO Mosaic Studio\n  lego-mosaic [serve]\n  lego-mosaic convert IMAGE --output mosaic.svg [options]\n\n  --size N | --width N --height N     studs (1–192, default 48)\n  --palette mosaic-maker|monochrome|extended\n  --preset artwork|photo|natural|grayscale|yellow-accent\n  --recipe FILE    load JSON Options; flags override recipe\n  --save-recipe FILE    save effective Options JSON\n  --parts FILE.csv --guide FILE.svg\n  --studs         round tile SVG (default flat SVG)\n  --brightness N --contrast N --gamma N --saturation N\n  --fit contain|crop|stretch --pad N (0–255)
-  --color-limit N   cap tiles per color (e.g. 900 for set 40179; 0=off)\n  --outline-strength N    0–1, artwork only\n  --dither | --no-dither\n  --force         permit replacing existing output files\n\nPNG output is also supported: one pixel per stud, exact palette colors.\nPhoto/natural presets disable illustration recoloring. Recipes expose all\ncolor-family, crop and processing controls. Input PNG/JPEG/WebP/GIF; first frame."
+  --color-limit N   cap tiles per color (e.g. 900 for set 40179; 0=off)\n  --stages-dir DIR  write fitted/adjusted/recolored/tiles PNGs for inspection\n  --outline-strength N    0–1, artwork only\n  --dither | --no-dither\n  --force         permit replacing existing output files\n\nPNG output is also supported: one pixel per stud, exact palette colors.\nPhoto/natural presets disable illustration recoloring. Recipes expose all\ncolor-family, crop and processing controls. Input PNG/JPEG/WebP/GIF; first frame."
 }
 
 #[derive(Debug)]
@@ -19,6 +19,7 @@ struct Request {
     options: Options,
     studs: bool,
     force: bool,
+    stages_dir: Option<PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<Request, String> {
@@ -51,6 +52,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
                 "fit",
                 "pad",
                 "color-limit",
+                "stages-dir",
             ]
             .contains(&key)
             {
@@ -209,6 +211,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
         options,
         studs: flags.contains(&"--studs"),
         force: flags.contains(&"--force"),
+        stages_dir: values.get("stages-dir").map(PathBuf::from),
     })
 }
 
@@ -241,6 +244,11 @@ fn validate_paths(request: &Request) -> Result<(), String> {
             return Err("Output path is a directory".into());
         }
     }
+    if let Some(dir) = &request.stages_dir {
+        if dir.exists() && !request.force {
+            return Err(format!("{} exists; use --force", dir.display()));
+        }
+    }
     Ok(())
 }
 
@@ -270,6 +278,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
         pixels: image.into_raw(),
     };
     let mosaic = lego_mosaic::convert(&raster, &req.palette, &req.options)?;
+    let stage_rasters: Vec<(String, Raster)> = if req.stages_dir.is_some() {
+        let tiles = &lego_mosaic::palettes()
+            .iter()
+            .find(|p| p.0 == req.palette)
+            .ok_or("Unknown palette")?
+            .2;
+        let s = lego_mosaic::stages(&raster, tiles, &req.options);
+        vec![
+            ("fitted".into(), s.fitted),
+            ("adjusted".into(), s.adjusted),
+            ("recolored".into(), s.recolored),
+            ("tiles".into(), s.tiles),
+        ]
+    } else {
+        Vec::new()
+    };
     let svg = if req.studs {
         lego_mosaic::stud_svg(&mosaic, 20)
     } else {
@@ -313,6 +337,27 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .open(path)
             .map_err(|e| format!("Write {}: {e}", path.display()))?;
         file.write_all(&bytes).map_err(|e| e.to_string())?;
+    }
+    if let Some(dir) = &req.stages_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Create {}: {e}", dir.display()))?;
+        let stem = req
+            .input
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .unwrap_or("image");
+        for (name, raster) in &stage_rasters {
+            let mut img = image::RgbaImage::new(raster.width as u32, raster.height as u32);
+            for (i, px) in raster.pixels.as_chunks::<4>().0.iter().enumerate() {
+                img.put_pixel(
+                    (i % raster.width) as u32,
+                    (i / raster.width) as u32,
+                    image::Rgba([px[0], px[1], px[2], 255]),
+                );
+            }
+            let path = dir.join(format!("{stem}-{name}.png"));
+            img.save(&path)
+                .map_err(|e| format!("Write {}: {e}", path.display()))?;
+        }
     }
     eprintln!(
         "{} × {} mosaic, {} tiles; palette {}",

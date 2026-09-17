@@ -14,7 +14,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     Blob, BlobPropertyBag, CanvasRenderingContext2d, Document, Element, Event, File,
     HtmlAnchorElement, HtmlCanvasElement, HtmlElement, HtmlFieldSetElement, HtmlImageElement,
-    HtmlInputElement, HtmlSelectElement, ImageBitmap, Url,
+    HtmlInputElement, HtmlSelectElement, ImageBitmap, ImageData, Url,
 };
 
 use crate::mosaic::{FitMode, HueMode, Mosaic, Options, Order, Raster};
@@ -24,7 +24,26 @@ type Shared = Rc<RefCell<App>>;
 
 /// Wire format of the worker's successful reply.
 #[allow(clippy::type_complexity)]
-type WorkerReply = (Vec<usize>, usize, usize, Vec<usize>, Vec<(usize, usize)>);
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StageImage {
+    None,
+    Some {
+        width: usize,
+        height: usize,
+        pixels: Vec<u8>,
+    },
+}
+type StagePayload = (StageImage, StageImage, StageImage, StageImage);
+#[allow(clippy::type_complexity)] // worker wire format
+type WorkerReply = (
+    Vec<usize>,
+    usize,
+    usize,
+    Vec<usize>,
+    Vec<(usize, usize)>,
+    StagePayload,
+);
 
 #[derive(Default)]
 struct App {
@@ -349,6 +368,7 @@ fn apply_preset(state: &Shared, preset: &str, reset: bool) -> Result<(), JsValue
         ("white_background", options.white_background),
         ("despeckle", options.despeckle),
         ("dither", options.dither),
+        ("stage_previews", options.stage_previews),
     ] {
         input(id)?.set_checked(checked);
     }
@@ -412,6 +432,7 @@ fn read_options(state: &Shared) -> Result<(String, Options), JsValue> {
             .get(&palette_id)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default(),
+        stage_previews: input("stage_previews")?.checked(),
         ..Options::default()
     };
     options.hue_remap.mode = match select("hue_mode")?.value().as_str() {
@@ -611,6 +632,65 @@ fn blob_url(content: &str, mime: &str) -> Result<String, JsValue> {
     Url::create_object_url_with_blob(&blob)
 }
 
+/// Render optional worker stage rasters into the collapsible stage section.
+fn show_stages(stages: &StagePayload) -> Result<(), JsValue> {
+    let payloads = [&stages.0, &stages.1, &stages.2, &stages.3];
+    let names = ["fitted", "adjusted", "recolored", "tiles"];
+    for (name, payload) in names.iter().zip(payloads) {
+        let element = element(&format!("stage-{name}"))?;
+        let raster = match payload {
+            StageImage::Some {
+                width,
+                height,
+                pixels,
+            } => Some((*width, *height, pixels)),
+            StageImage::None => None,
+        };
+        match raster_data_url(raster.as_ref())? {
+            Some(url) => {
+                element.dyn_into::<HtmlImageElement>()?.set_src(&url);
+                hidden(&format!("stage-{name}"), false)?;
+            }
+            None => {
+                hidden(&format!("stage-{name}"), true)?;
+            }
+        }
+    }
+    if payloads
+        .iter()
+        .any(|p| matches!(p, StageImage::Some { .. }))
+    {
+        hidden("stages-card", false)?;
+    } else {
+        hidden("stages-card", true)?;
+    }
+    Ok(())
+}
+
+/// Encode a stage raster as a PNG data URL through a canvas (no uploads).
+fn raster_data_url(payload: Option<&(usize, usize, &Vec<u8>)>) -> Result<Option<String>, JsValue> {
+    let Some((width, height, pixels)) = payload else {
+        return Ok(None);
+    };
+    if pixels.len() != width * height * 4 {
+        return Ok(None);
+    }
+    let canvas: HtmlCanvasElement = document()?.create_element("canvas")?.dyn_into()?;
+    canvas.set_width(*width as u32);
+    canvas.set_height(*height as u32);
+    let context: CanvasRenderingContext2d = canvas
+        .get_context("2d")?
+        .ok_or_else(|| JsValue::from_str("Canvas is unavailable"))?
+        .dyn_into()?;
+    let data = ImageData::new_with_u8_clamped_array_and_sh(
+        wasm_bindgen::Clamped(pixels.as_slice()),
+        *width as u32,
+        *height as u32,
+    )?;
+    context.put_image_data(&data, 0.0, 0.0)?;
+    Ok(Some(canvas.to_data_url_with_type("image/png")?))
+}
+
 fn present(state: &Shared, mosaic: Mosaic, elapsed: f64) -> Result<(), JsValue> {
     let style = select("preview_style")?.value();
     let svg = if style == "flat" {
@@ -800,7 +880,7 @@ fn build(state: &Shared) -> Result<(), JsValue> {
                     return Err(body.into());
                 }
                 #[allow(clippy::type_complexity)] // worker wire format
-                let (grid, width, height, colors, overflow): WorkerReply =
+                let (grid, width, height, colors, overflow, stage_payload): WorkerReply =
                     serde_json::from_str(&body).map_err(|e| JsValue::from_str(&e.to_string()))?;
                 let palette = colors
                     .into_iter()
@@ -824,7 +904,8 @@ fn build(state: &Shared) -> Result<(), JsValue> {
                         overflow,
                     },
                     js_sys::Date::now() - start,
-                )
+                )?;
+                show_stages(&stage_payload)
             })();
             finish_worker(&state, result.err());
         });

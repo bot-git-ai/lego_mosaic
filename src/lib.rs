@@ -19,7 +19,7 @@ mod browser;
 
 // One public core shared by the native CLI and the Rust browser front end.
 pub use color::Srgb;
-pub use mosaic::{FitMode, HueMode, HueRemap, Mosaic, Options, Order, Raster};
+pub use mosaic::{stages, FitMode, HueMode, HueRemap, Mosaic, Options, Order, Raster, Stages};
 pub use palette::{all as palettes, TileColor};
 pub use render::{
     build_rows, build_rows_order, flat_svg, guide_svg, guide_svg_order, parts_csv, stud_svg,

@@ -133,6 +133,9 @@ pub struct Options {
     pub zoom: f64,
     pub hue_remap: HueRemap,
     pub secondary_remap: HueRemap,
+    /// Transport-only opt-in: the worker includes stage preview rasters in
+    /// its reply. Never affects conversion output; recipes may carry it.
+    pub stage_previews: bool,
 }
 
 impl Default for Options {
@@ -168,6 +171,7 @@ impl Default for Options {
                 target: [160, 165, 169],
                 ..HueRemap::default()
             },
+            stage_previews: false,
         }
     }
 }
@@ -212,6 +216,7 @@ fn bounded(x: f64, lo: f64, hi: f64, default: f64) -> f64 {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Mosaic {
     pub grid: Vec<usize>,
     pub width: usize,
@@ -230,78 +235,197 @@ const WHITE: Lab = Lab {
     b: 0.0,
 };
 
-pub fn convert(image: &Raster, palette: &[TileColor], options: &Options) -> Mosaic {
+/// Intermediate pipeline images for inspection, all at the mosaic grid
+/// resolution: `fitted` (resample + padding), `adjusted` (exposure, gamma,
+/// contrast, saturation), `recolored` (HSV family remaps + neutral cleanup,
+/// shown sRGB-encoded — this is what the matcher sees in Lab) and `tiles`
+/// (each stud in its exact final tile color — the mosaic as a plain image).
+/// `mosaic` is the identical result `convert()` returns.
+#[derive(Clone, Debug)]
+pub struct Stages {
+    pub fitted: Raster,
+    pub adjusted: Raster,
+    pub recolored: Raster,
+    pub tiles: Raster,
+    pub mosaic: Mosaic,
+}
+
+/// Run the pipeline, keeping the intermediate images. The mosaic comes from
+/// the same code path as `convert()`, which delegates here, so the previews
+/// can never drift from the actual result.
+pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stages {
     let o = options.sanitized();
     let palette = excluded_palette(palette, &o.excluded);
     let labs: Vec<_> = palette.iter().map(|t| t.rgb.to_lab()).collect();
-    let mut cells = vec![WHITE; o.width * o.height];
-    let mut grid = vec![nearest(&WHITE, &labs); cells.len()];
-    let mut confidence = vec![1.0; cells.len()];
-    if image.valid() {
-        let hi = resample(image, o.width * OVERSAMPLE, o.height * OVERSAMPLE, &o);
-        let remap_target = remap_target(&o.hue_remap, &labs);
-        let secondary_target = if o.secondary_remap.mode == HueMode::Auto {
-            if palette.len() <= 6 {
-                labs.iter()
-                    .copied()
-                    .filter(|l| chroma(*l) < 15.0 && l.l > 45.0 && l.l < 85.0)
-                    .max_by(|a, b| a.l.total_cmp(&b.l))
-            } else {
-                None
-            }
-        } else {
-            remap_target_for_secondary(&o.secondary_remap, &labs)
-        };
-        // Tiny fixed RGB cache: deterministic canonical 6-bit/channel colors.
-        // This bounds expensive CIEDE2000 matching to 262k distinct colors,
-        // and usually just a few hundred for flat illustrations.
-        let mut cache = vec![usize::MAX; 64 * 64 * 64];
-        let mut transformed = Vec::with_capacity(hi.len());
-        let mut indices = Vec::with_capacity(hi.len());
-        for rgb in hi {
-            let key = (usize::from(rgb.r >> 2) << 12)
-                | (usize::from(rgb.g >> 2) << 6)
-                | usize::from(rgb.b >> 2);
-            let lab = preprocess_both(rgb, &o, remap_target, secondary_target);
-            transformed.push(lab);
-            if cache[key] == usize::MAX {
-                // Use a canonical bin center instead of the first encountered
-                // sample so reversing the source never changes color decisions.
-                let canonical = Srgb::new((rgb.r & 252) | 2, (rgb.g & 252) | 2, (rgb.b & 252) | 2);
-                cache[key] = nearest(
-                    &preprocess_both(canonical, &o, remap_target, secondary_target),
-                    &labs,
-                );
-            }
-            indices.push(cache[key]);
-        }
-        pool(
-            &transformed,
-            &indices,
-            &labs,
-            &o,
-            &mut cells,
-            &mut grid,
-            &mut confidence,
-        );
-    }
-    let dithering = o.dither && o.dither_strength > 0.0;
-    if dithering {
-        grid = diffuse(&cells, &labs, o.width, o.height, o.dither_strength);
-    } else if o.despeckle && o.despeckle_strength > 0.0 {
-        despeckle(&mut grid, &cells, &confidence, &labs, &o);
-    }
-    let overflow = enforce_color_limit(&mut grid, &cells, &confidence, &labs, o.color_limit);
-    Mosaic {
+    let white = nearest(&WHITE, &labs);
+    let blank = Raster {
         width: o.width,
         height: o.height,
-        grid,
-        palette,
-        overflow,
+        pixels: vec![255; o.width * o.height * 4],
+    };
+    let empty_grid = vec![white; o.width * o.height];
+    if !image.valid() || o.width * o.height == 0 {
+        return Stages {
+            fitted: blank.clone(),
+            adjusted: blank.clone(),
+            recolored: blank.clone(),
+            tiles: blank,
+            mosaic: Mosaic {
+                width: o.width,
+                height: o.height,
+                grid: empty_grid,
+                palette,
+                overflow: Vec::new(),
+            },
+        };
+    }
+    let hi = resample(image, o.width * OVERSAMPLE, o.height * OVERSAMPLE, &o);
+    let fitted = raster_from_srgb(&average_studs(&hi, &o), o.width, o.height);
+    let remap_target = remap_target(&o.hue_remap, &labs);
+    let secondary_target = if o.secondary_remap.mode == HueMode::Auto {
+        if palette.len() <= 6 {
+            labs.iter()
+                .copied()
+                .filter(|l| chroma(*l) < 15.0 && l.l > 45.0 && l.l < 85.0)
+                .max_by(|a, b| a.l.total_cmp(&b.l))
+        } else {
+            None
+        }
+    } else {
+        remap_target_for_secondary(&o.secondary_remap, &labs)
+    };
+    // Tiny fixed RGB cache: deterministic canonical 6-bit/channel colors.
+    // This bounds expensive CIEDE2000 matching to 262k distinct colors,
+    // and usually just a few hundred for flat illustrations.
+    let mut cache = vec![usize::MAX; 64 * 64 * 64];
+    let mut transformed = Vec::with_capacity(hi.len());
+    let mut indices = Vec::with_capacity(hi.len());
+    let mut adjusted_rgb = Vec::with_capacity(hi.len());
+    let mut recolored_rgb = Vec::with_capacity(hi.len());
+    for rgb in hi {
+        adjusted_rgb.push(adjust(rgb, &o));
+        let lab = preprocess_both(rgb, &o, remap_target, secondary_target);
+        transformed.push(lab);
+        recolored_rgb.push(lab_to_srgb(lab));
+        let key = (usize::from(rgb.r >> 2) << 12)
+            | (usize::from(rgb.g >> 2) << 6)
+            | usize::from(rgb.b >> 2);
+        if cache[key] == usize::MAX {
+            // Use a canonical bin center instead of the first encountered
+            // sample so reversing the source never changes color decisions.
+            let canonical = Srgb::new((rgb.r & 252) | 2, (rgb.g & 252) | 2, (rgb.b & 252) | 2);
+            cache[key] = nearest(
+                &preprocess_both(canonical, &o, remap_target, secondary_target),
+                &labs,
+            );
+        }
+        indices.push(cache[key]);
+    }
+    let adjusted = raster_from_srgb(&average_studs(&adjusted_rgb, &o), o.width, o.height);
+    let recolored = raster_from_srgb(&average_studs(&recolored_rgb, &o), o.width, o.height);
+    let mut cells = vec![WHITE; o.width * o.height];
+    let mut grid = empty_grid.clone();
+    let mut confidence = vec![1.0; cells.len()];
+    pool(
+        &transformed,
+        &indices,
+        &labs,
+        &o,
+        &mut cells,
+        &mut grid,
+        &mut confidence,
+    );
+    let dithering = o.dither && o.dither_strength > 0.0;
+    let mut grid = if dithering {
+        diffuse(&cells, &labs, o.width, o.height, o.dither_strength)
+    } else if o.despeckle && o.despeckle_strength > 0.0 {
+        despeckle(&mut grid, &cells, &confidence, &labs, &o);
+        grid
+    } else {
+        grid
+    };
+    let overflow = enforce_color_limit(&mut grid, &cells, &confidence, &labs, o.color_limit);
+    let tiles = raster_from_tiles(&grid, &palette, &o);
+    Stages {
+        fitted,
+        adjusted,
+        recolored,
+        tiles,
+        mosaic: Mosaic {
+            width: o.width,
+            height: o.height,
+            grid,
+            palette,
+            overflow,
+        },
     }
 }
 
-/// Enforce `color_limit`: reassign overflow tiles to the nearest open
+/// Collapse the OVERSAMPLE×OVERSAMPLE samples per stud into one color so
+/// stage previews are one pixel per stud (a block mean of the encoded sRGB).
+fn average_studs(samples: &[Srgb], o: &Options) -> Vec<Srgb> {
+    let hi_w = o.width * OVERSAMPLE;
+    let n = (OVERSAMPLE * OVERSAMPLE) as f64;
+    (0..o.height)
+        .flat_map(|gy| {
+            (0..o.width).map(move |gx| {
+                let mut sum = [0.0_f64; 3];
+                for dy in 0..OVERSAMPLE {
+                    for dx in 0..OVERSAMPLE {
+                        let c = samples[(gy * OVERSAMPLE + dy) * hi_w + gx * OVERSAMPLE + dx];
+                        sum[0] += f64::from(c.r) / n;
+                        sum[1] += f64::from(c.g) / n;
+                        sum[2] += f64::from(c.b) / n;
+                    }
+                }
+                Srgb::new(
+                    byte(sum[0] / 255.0),
+                    byte(sum[1] / 255.0),
+                    byte(sum[2] / 255.0),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Quantize Lab back to displayable sRGB. The pipeline itself never leaves
+/// Lab; this exists so stage previews can show what the matcher saw.
+fn lab_to_srgb(lab: Lab) -> Srgb {
+    let [r, g, b] = lab_to_linear(lab);
+    Srgb::new(byte(encoded(r)), byte(encoded(g)), byte(encoded(b)))
+}
+
+fn raster_from_srgb(rgb: &[Srgb], width: usize, height: usize) -> Raster {
+    let mut pixels = Vec::with_capacity(width * height * 4);
+    for c in rgb {
+        pixels.extend_from_slice(&[c.r, c.g, c.b, 255]);
+    }
+    Raster {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// The mosaic as a plain image: each stud in its exact final tile color.
+fn raster_from_tiles(grid: &[usize], palette: &[TileColor], o: &Options) -> Raster {
+    let mut pixels = Vec::with_capacity(grid.len() * 4);
+    for &index in grid {
+        let c = palette[index].rgb;
+        pixels.extend_from_slice(&[c.r, c.g, c.b, 255]);
+    }
+    Raster {
+        width: o.width,
+        height: o.height,
+        pixels,
+    }
+}
+
+pub fn convert(image: &Raster, palette: &[TileColor], options: &Options) -> Mosaic {
+    stages(image, palette, options).mosaic
+}
+
+/// Enforce `color_limit` `color_limit`: reassign overflow tiles to the nearest open
 /// color (deterministic scan order), protecting outline-preserved studs
 /// (confidence 1.0) until nothing else remains. Reports per-color excess
 /// that could not be absorbed — the caller decides how to surface it.
@@ -1108,6 +1232,49 @@ mod tests {
         let n_white = result.grid.iter().filter(|&&i| i == white).count();
         assert!(n_white <= 12, "white must be capped, got {n_white}");
         assert!(result.overflow.iter().all(|(i, _)| *i != white));
+    }
+
+    #[test]
+    fn stages_match_convert_and_show_each_transform() {
+        // Pink artwork with the Auto accent remap: fitted shows the resampled
+        // source, adjusted applies tone (identity at defaults), recolored
+        // moves the muted pink family to the yellow accent, tiles equal the
+        // final palette colors, and the mosaic matches convert() exactly.
+        let mut source = solid(32, 32, [255, 255, 255, 255]);
+        for y in 8..24 {
+            for x in 8..24 {
+                source.put(x, y, [214, 106, 120, 255]);
+            }
+        }
+        let mut o = options(8, 8);
+        o.hue_remap.mode = HueMode::Auto;
+        let result = convert(&source, MOSAIC_MAKER, &o);
+        let stages = stages(&source, MOSAIC_MAKER, &o);
+        assert_eq!(stages.fitted.width, 8);
+        assert_eq!(stages.fitted.pixels.len(), 8 * 8 * 4);
+        assert_eq!(stages.mosaic.grid, result.grid);
+        // Fitted keeps the source pink.
+        let mid = (4 * 8 + 4) * 4;
+        assert!(stages.fitted.pixels[mid] > 180 && stages.fitted.pixels[mid] < 230);
+        // Adjusted (default tone options) is identical to fitted.
+        assert_eq!(stages.adjusted.pixels, stages.fitted.pixels);
+        // Recolored shows the yellow accent family the matcher sees.
+        assert!(stages.recolored.pixels[mid] > 200);
+        assert!(stages.recolored.pixels[mid + 2] < 120);
+        // Tiles equal the exact palette color of each final stud.
+        for (i, &index) in stages.mosaic.grid.iter().enumerate() {
+            let c = stages.mosaic.palette[index].rgb;
+            assert_eq!(&stages.tiles.pixels[i * 4..i * 4 + 3], &[c.r, c.g, c.b][..]);
+        }
+        // Blank input yields blank stages with a complete grid.
+        let blank = Raster {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+        let empty = crate::mosaic::stages(&blank, MOSAIC_MAKER, &o);
+        assert_eq!(empty.fitted.pixels, vec![255; 8 * 8 * 4]);
+        assert_eq!(empty.mosaic.grid.len(), 64);
     }
 
     #[test]

@@ -114,6 +114,17 @@ let browser;
   await set('color_limit','0');await page.click('#reset');
   console.log('PASS color cap satisfied and exceeded states');
  }
+ // Processing stages: opt-in toggle reveals stage images after a build.
+ if(process.argv[2]){
+  await page.locator('#stage_previews').evaluate(el=>{el.checked=true;el.dispatchEvent(new Event('change',{bubbles:true}));});await build();
+  for(const id of ['stage-fitted','stage-adjusted','stage-recolored','stage-tiles'])
+   assert.ok(await page.locator('#'+id).isVisible(),id+' visible');
+  assert.match(await page.locator('#stages-card').innerText(),/Processing stages/);
+  await page.locator('#stage_previews').evaluate(el=>{el.checked=false;el.dispatchEvent(new Event('change',{bubbles:true}));});await build();
+  assert.ok(await page.locator('#stages-card').isHidden(),'stages hidden when off');
+  await page.click('#reset');
+  console.log('PASS processing stages on and off');
+ }
  // Failure recovery must preserve the previous result and allow another build.
  await page.locator('#image').setInputFiles({name:'broken.png',mimeType:'image/png',buffer:Buffer.from('not an image')});await ready();assert.equal(await page.locator('#error').isVisible(),true);await build();
  assert.equal(errors.length,0,errors.join('\n'));
