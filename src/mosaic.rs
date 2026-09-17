@@ -809,6 +809,11 @@ fn bright_channel(
     let need_clear = 3 + ((1.0 - strength) * 1.999) as usize;
     let need_bounded = 2 + ((1.0 - strength) * 1.999) as usize;
     let flank_dark = 50.0 + 5.0 * strength;
+    // Corner channels need stronger evidence than straight ones: a genuinely
+    // dark feature in this footprint, not merely a mid-gray silhouette.
+    let dark_corner = (0..OVERSAMPLE).any(|dy| {
+        (0..OVERSAMPLE).any(|dx| hi[(gy * OVERSAMPLE + dy) * w + gx * OVERSAMPLE + dx].l < 40.0)
+    });
     for vertical in [true, false] {
         for offset in 1..=2 {
             let (cx, cy) = (gx * OVERSAMPLE, gy * OVERSAMPLE);
@@ -836,7 +841,22 @@ fn bright_channel(
                             && hi[ny as usize * w + nx as usize].l < flank_dark
                     })
                 };
-                if dark_side(-1) && dark_side(1) {
+                let diagonal_bounded = dark_corner
+                    && strength >= 0.5
+                    && [-1_isize, 1].into_iter().any(|slope| {
+                        [-1_isize, 1].into_iter().all(|sign| {
+                            (1..=4).any(|distance| {
+                                let nx = x as isize + sign * distance;
+                                let ny = y as isize + slope * sign * distance;
+                                nx >= 0
+                                    && ny >= 0
+                                    && nx < w as isize
+                                    && ny < h as isize
+                                    && hi[ny as usize * w + nx as usize].l < flank_dark
+                            })
+                        })
+                    });
+                if (dark_side(-1) && dark_side(1)) || diagonal_bounded {
                     bounded += 1;
                 }
             }
@@ -1088,6 +1108,43 @@ mod tests {
         let n_white = result.grid.iter().filter(|&&i| i == white).count();
         assert!(n_white <= 12, "white must be capped, got {n_white}");
         assert!(result.overflow.iter().all(|(i, _)| *i != white));
+    }
+
+    #[test]
+    fn turning_gap_preserves_white_without_erasing_isolated_outline() {
+        // A dark patch ends above a white channel which turns beside a
+        // separate outline. There is no straight pair of dark flanks.
+        let mut source = solid(32, 32, [255, 255, 255, 255]);
+        for y in 8..13 {
+            for x in 8..16 {
+                source.put(x, y, [30, 30, 30, 255]);
+            }
+        }
+        for y in 15..24 {
+            source.put(18, y, [30, 30, 30, 255]);
+        }
+        let mut o = options(8, 8);
+        o.despeckle = false;
+        o.separator_guard = 0.0;
+        let unguarded = convert(&source, MOSAIC_MAKER, &o);
+        o.separator_guard = 1.0;
+        let guarded = convert(&source, MOSAIC_MAKER, &o);
+        assert_ne!(unguarded.grid[3 * 8 + 3], 0);
+        assert_eq!(
+            guarded.grid[3 * 8 + 3],
+            0,
+            "turning light channel stays open"
+        );
+        assert_eq!(
+            guarded.grid[2 * 8 + 3],
+            unguarded.grid[2 * 8 + 3],
+            "solid patch retained"
+        );
+        assert_eq!(
+            guarded.grid[5 * 8 + 4],
+            unguarded.grid[5 * 8 + 4],
+            "isolated outline retained"
+        );
     }
 
     #[test]
