@@ -42,7 +42,9 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
 
 - `mosaic.rs`: bounded RGBA Raster → fractional-area resampling with contain or
   positioned/zoomed crop or independent-axis stretch, gray padding → configurable color adjustment/remapping → perceptual
-  matching. Sharp mode preserves dark feature coverage; Smooth pools linear
+  matching. Sharp mode preserves dark feature coverage, but does not promote
+  minority dark pixels over a source-supported bright separator between dark
+  features (prevents eye patches merging with outlines); Smooth pools linear
   light. Both support serpentine final-stud dithering. Conservative deterministic
   despeckling is skipped during dithering. Options serde defaults and bounds are
   in this file; dimensions sanitized 1–192 (UI allows 8–128).
