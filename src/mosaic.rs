@@ -646,6 +646,9 @@ fn pool(
                 && coverage >= 0.26 - 0.22 * o.outline_strength
                 && palette[best].l - darkest.l > 12.0;
             let preserve_ink = (ink >= 0.19 && darkest.l < 30.0 && palette[best].l > 45.0) || line;
+            // A bright channel between two dark features is meaningful too.
+            // Do not let minority-outline promotion close that source gap.
+            let preserve_ink = preserve_ink && !bright_channel(hi, gx, gy, o.width, o.height);
             if preserve_ink {
                 best = nearest(&darkest, palette);
             }
@@ -685,6 +688,51 @@ fn pool(
             }
         }
     }
+}
+
+/// Detect a light separator through the central half of a stud, bounded
+/// by dark features on both sides. Unlike erosion, this never opens a gap
+/// without source evidence and leaves isolated silhouettes untouched.
+fn bright_channel(hi: &[Lab], gx: usize, gy: usize, width: usize, height: usize) -> bool {
+    let w = width * OVERSAMPLE;
+    let h = height * OVERSAMPLE;
+    for vertical in [true, false] {
+        for offset in 1..=2 {
+            let (cx, cy) = (gx * OVERSAMPLE, gy * OVERSAMPLE);
+            let mut clear = 0;
+            let mut bounded = 0;
+            for along in 0..OVERSAMPLE {
+                let (x, y) = if vertical {
+                    (cx + offset, cy + along)
+                } else {
+                    (cx + along, cy + offset)
+                };
+                let center = hi[y * w + x];
+                if center.l < 85.0 || chroma(center) > 12.0 {
+                    continue;
+                }
+                clear += 1;
+                let dark_side = |sign: isize| {
+                    (1..=4).any(|distance| {
+                        let nx = x as isize + if vertical { sign * distance } else { 0 };
+                        let ny = y as isize + if vertical { 0 } else { sign * distance };
+                        nx >= 0
+                            && ny >= 0
+                            && nx < w as isize
+                            && ny < h as isize
+                            && hi[ny as usize * w + nx as usize].l < 55.0
+                    })
+                };
+                if dark_side(-1) && dark_side(1) {
+                    bounded += 1;
+                }
+            }
+            if clear >= 3 && bounded >= 2 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Real per-stud serpentine diffusion in linear RGB, perceptual palette
@@ -878,6 +926,36 @@ mod tests {
                 .iter()
                 .all(|c| c.r == 128 && c.g == 128 && c.b == 128));
         }
+    }
+
+    #[test]
+    fn narrow_white_separator_is_not_closed_by_outline_preservation() {
+        let mut source = solid(32, 32, [255, 255, 255, 255]);
+        for y in 0..32 {
+            for x in 8..12 {
+                source.put(x, y, [20, 20, 20, 255]);
+            }
+            for x in 15..17 {
+                source.put(x, y, [110, 110, 110, 255]);
+            }
+        }
+        let result = convert(&source, MOSAIC_MAKER, &options(8, 8));
+        let expected: Vec<_> = (0..64)
+            .map(|i| match i % 8 {
+                2 => "Black",
+                4 => "Dark Bluish Gray",
+                _ => "White",
+            })
+            .collect();
+        let actual: Vec<_> = result
+            .grid
+            .iter()
+            .map(|&i| result.palette[i].name)
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "preserve both the dark feature and its white separator, across the entire grid"
+        );
     }
 
     #[test]
