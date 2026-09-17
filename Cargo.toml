@@ -4,6 +4,7 @@
 name = "lego-mosaic"
 version = "0.3.0"
 edition = "2021"
+license = "AGPL-3.0-only"
 description = "Private, browser-side LEGO mosaic design in Rust"
 
 [lib]
