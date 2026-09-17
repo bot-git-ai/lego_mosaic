@@ -21,7 +21,9 @@ mod browser;
 pub use color::Srgb;
 pub use mosaic::{FitMode, HueMode, HueRemap, Mosaic, Options, Order, Raster};
 pub use palette::{all as palettes, TileColor};
-pub use render::{flat_svg, guide_svg, parts_csv, stud_svg};
+pub use render::{
+    build_rows, build_rows_order, flat_svg, guide_svg, guide_svg_order, parts_csv, stud_svg,
+};
 
 pub fn convert(image: &Raster, palette_id: &str, options: &Options) -> Result<Mosaic, String> {
     let tiles = palette::all()
@@ -31,3 +33,6 @@ pub fn convert(image: &Raster, palette_id: &str, options: &Options) -> Result<Mo
         .2;
     Ok(mosaic::convert(image, tiles, options))
 }
+
+#[cfg(target_arch = "wasm32")]
+mod worker;

@@ -100,6 +100,27 @@ fn route(request: &server::Request) -> server::Response {
             content_type: "text/javascript; charset=utf-8",
             body: BINDINGS.as_bytes().to_vec(),
         },
+        ("GET", "/manifest.webmanifest") => server::Response {
+            status: 200, content_type: "application/manifest+json",
+            body: br##"{"id":"./","name":"Mosaic Studio","short_name":"Mosaic","start_url":"./","scope":"./","display":"standalone","background_color":"#f4f6f8","theme_color":"#17243a","icons":[{"src":"icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},{"src":"icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}"##.to_vec(),
+        },
+        ("GET", "/icon-192.png") => server::Response {status:200,content_type:"image/png",body:include_bytes!("../assets/icon-192.png").to_vec()},
+        ("GET", "/icon-512.png") => server::Response {status:200,content_type:"image/png",body:include_bytes!("../assets/icon-512.png").to_vec()},
+        ("GET", "/service-worker.js") => {
+            // Content-derived cache version: any shell/wasm/worker change creates
+            // a fresh atomic install. Never clear other apps' origin caches.
+            use std::hash::{Hash, Hasher};
+            let mut version=std::collections::hash_map::DefaultHasher::new();
+            WASM.hash(&mut version);BINDINGS.hash(&mut version);ui::page().hash(&mut version);
+            include_str!("worker.js").hash(&mut version);
+            include_str!("service-worker.js").hash(&mut version);
+            server::Response {status:200,content_type:"text/javascript; charset=utf-8",body:include_str!("service-worker.js").replace("__VERSION__",&format!("{:x}",version.finish())).into_bytes()}
+        },
+        ("GET", "/worker.js") => server::Response {
+            status: 200,
+            content_type: "text/javascript; charset=utf-8",
+            body: include_bytes!("worker.js").to_vec(),
+        },
         ("GET", "/healthz") => server::Response::text(200, "ok\n"),
         ("GET", _) => server::Response::text(404, "not found\n"),
         (_, _) => server::Response::text(405, "method not allowed\n"),

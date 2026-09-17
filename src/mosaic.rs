@@ -53,8 +53,12 @@ pub enum Order {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FitMode {
+    /// Whole image inside the grid, outer area filled with `pad`.
     Contain,
+    /// Fill the grid, cropping overflow (position/zoom apply).
     Crop,
+    /// Ignore aspect ratio: rescale both axes independently to the grid.
+    Stretch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +118,8 @@ pub struct Options {
     pub despeckle_strength: f64,
     pub excluded: Vec<usize>,
     pub fit: FitMode,
+    /// Contain padding color, 0–255 gray (255 = white).
+    pub pad: u8,
     pub crop_x: f64,
     pub crop_y: f64,
     pub zoom: f64,
@@ -140,6 +146,7 @@ impl Default for Options {
             despeckle_strength: 0.35,
             excluded: Vec::new(),
             fit: FitMode::Contain,
+            pad: 255,
             crop_x: 0.5,
             crop_y: 0.5,
             zoom: 1.0,
@@ -302,6 +309,8 @@ fn viewport(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> (f64, f6
     let scale = match o.fit {
         FitMode::Contain => sx.max(sy),
         FitMode::Crop => sx.min(sy) / o.zoom,
+        // Independent axes: each output column/row sees the full source axis.
+        FitMode::Stretch => return (0.0, 0.0, sx, sy),
     };
     let vw = out_w as f64 * scale;
     let vh = out_h as f64 * scale;
@@ -357,8 +366,9 @@ fn resample(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> Vec<Srgb
             let left = vx + x as f64 * dx;
             let right = left + dx;
             let area = dx * dy;
-            // Start with a white footprint, subtract covered non-white.
-            let mut sum = [area; 3];
+            // Composite uncovered and transparent source area over padding.
+            let pad_value = table[usize::from(o.pad)];
+            let mut sum = [area * pad_value; 3];
             let x0 = left.floor().max(0.0).min(image.width as f64) as usize;
             let x1 = right.ceil().max(0.0).min(image.width as f64) as usize;
             let y0 = top.floor().max(0.0).min(image.height as f64) as usize;
@@ -370,7 +380,7 @@ fn resample(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> Vec<Srgb
                     let i = (sy * image.width + sx) * 4;
                     let weight = wx * wy * f64::from(image.pixels[i + 3]) / 255.0;
                     for c in 0..3 {
-                        sum[c] -= (1.0 - table[usize::from(image.pixels[i + c])]) * weight;
+                        sum[c] -= (pad_value - table[usize::from(image.pixels[i + c])]) * weight;
                     }
                 }
             }
@@ -841,6 +851,33 @@ mod tests {
                 rgb: Srgb::new(247, 209, 23),
             },
         ]
+    }
+
+    #[test]
+    fn non_square_fit_and_padding_are_explicit() {
+        let source = solid(8, 4, [255, 0, 0, 255]);
+        let mut o = Options {
+            pad: 0,
+            ..Options::default()
+        };
+        let contain = resample(&source, 8, 8, &o);
+        assert_eq!(contain[0].r, 0);
+        assert_eq!(contain[3 * 8].r, 255);
+        for mode in [FitMode::Crop, FitMode::Stretch] {
+            o.fit = mode;
+            assert!(resample(&source, 8, 8, &o)
+                .iter()
+                .all(|c| c.r == 255 && c.g == 0));
+        }
+        assert_eq!(viewport(&source, 8, 8, &o), (0.0, 0.0, 1.0, 0.5));
+        let transparent = solid(2, 2, [255, 0, 0, 0]);
+        o.pad = 128;
+        for order in [Order::Sharp, Order::Smooth] {
+            o.order = order;
+            assert!(resample(&transparent, 2, 2, &o)
+                .iter()
+                .all(|c| c.r == 128 && c.g == 128 && c.b == 128));
+        }
     }
 
     #[test]

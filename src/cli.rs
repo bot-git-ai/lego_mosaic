@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub fn help() -> &'static str {
-    "LEGO Mosaic Studio\n  lego-mosaic [serve]\n  lego-mosaic convert IMAGE --output mosaic.svg [options]\n\n  --size N | --width N --height N     studs (1–192, default 48)\n  --palette mosaic-maker|monochrome|extended\n  --preset artwork|photo|natural|grayscale|yellow-accent\n  --recipe FILE    load JSON Options; flags override recipe\n  --save-recipe FILE    save effective Options JSON\n  --parts FILE.csv --guide FILE.svg\n  --studs         round tile SVG (default flat SVG)\n  --brightness N --contrast N --gamma N --saturation N\n  --outline-strength N    0–1, artwork only\n  --dither | --no-dither\n  --force         permit replacing existing output files\n\nPNG output is also supported: one pixel per stud, exact palette colors.\nPhoto/natural presets disable illustration recoloring. Recipes expose all\ncolor-family, crop and processing controls. Input PNG/JPEG/WebP/GIF; first frame."
+    "LEGO Mosaic Studio\n  lego-mosaic [serve]\n  lego-mosaic convert IMAGE --output mosaic.svg [options]\n\n  --size N | --width N --height N     studs (1–192, default 48)\n  --palette mosaic-maker|monochrome|extended\n  --preset artwork|photo|natural|grayscale|yellow-accent\n  --recipe FILE    load JSON Options; flags override recipe\n  --save-recipe FILE    save effective Options JSON\n  --parts FILE.csv --guide FILE.svg\n  --studs         round tile SVG (default flat SVG)\n  --brightness N --contrast N --gamma N --saturation N\n  --fit contain|crop|stretch --pad N (0–255)\n  --outline-strength N    0–1, artwork only\n  --dither | --no-dither\n  --force         permit replacing existing output files\n\nPNG output is also supported: one pixel per stud, exact palette colors.\nPhoto/natural presets disable illustration recoloring. Recipes expose all\ncolor-family, crop and processing controls. Input PNG/JPEG/WebP/GIF; first frame."
 }
 
 #[derive(Debug)]
@@ -47,6 +47,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
                 "gamma",
                 "saturation",
                 "outline-strength",
+                "fit",
+                "pad",
             ]
             .contains(&key)
             {
@@ -124,6 +126,17 @@ fn parse(args: &[String]) -> Result<Request, String> {
         }
         overlay(&mut merged, recipe);
         options = serde_json::from_value(merged).map_err(|e| format!("Recipe Options: {e}"))?;
+    }
+    if let Some(fit) = values.get("fit") {
+        options.fit = match fit.as_str() {
+            "contain" => lego_mosaic::FitMode::Contain,
+            "crop" => lego_mosaic::FitMode::Crop,
+            "stretch" => lego_mosaic::FitMode::Stretch,
+            _ => return Err("Fit must be contain, crop or stretch".into()),
+        };
+    }
+    if let Some(pad) = values.get("pad") {
+        options.pad = pad.parse().map_err(|_| "Pad must be 0–255")?;
     }
     for key in ["size", "width", "height"] {
         if let Some(value) = values.get(key) {

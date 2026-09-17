@@ -27,7 +27,7 @@ wasm-bindgen = "=0.2.128"
 wasm-bindgen-futures = "0.4.78"
 js-sys = "0.3.105"
 web-sys = { version = "0.3.105", features = [
-  "Window", "Document", "Element", "Node", "NodeList", "EventTarget", "Event", "MouseEvent",
+  "Navigator", "ServiceWorkerContainer", "ServiceWorkerRegistration", "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "DedicatedWorkerGlobalScope", "Window", "Document", "Element", "Node", "NodeList", "EventTarget", "Event", "MouseEvent",
   "HtmlElement", "HtmlInputElement", "HtmlSelectElement", "HtmlButtonElement", "HtmlAnchorElement",
   "HtmlImageElement", "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "ImageBitmap",
   "File", "FileList", "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "DomTokenList",
