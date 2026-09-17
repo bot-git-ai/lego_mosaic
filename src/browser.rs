@@ -22,6 +22,10 @@ use crate::{palette, render};
 
 type Shared = Rc<RefCell<App>>;
 
+/// Wire format of the worker's successful reply.
+#[allow(clippy::type_complexity)]
+type WorkerReply = (Vec<usize>, usize, usize, Vec<usize>, Vec<(usize, usize)>);
+
 #[derive(Default)]
 struct App {
     file: Option<File>,
@@ -200,6 +204,10 @@ fn swatches(state: &Shared) -> Result<(), JsValue> {
 
 fn update_labels() -> Result<(), JsValue> {
     text("pad-v", &format!("{:.0}", number("pad")?))?;
+    text(
+        "separator_guard-v",
+        &format!("{:.0}%", number("separator_guard")? * 100.0),
+    )?;
     for id in ["contrast", "saturation", "gamma", "crop_zoom"] {
         text(&format!("{id}-v"), &format!("{:.2}×", number(id)?))?;
     }
@@ -316,6 +324,7 @@ fn apply_preset(state: &Shared, preset: &str, reset: bool) -> Result<(), JsValue
         ("saturation", options.saturation),
         ("gamma", options.gamma),
         ("outline_strength", options.outline_strength),
+        ("separator_guard", options.separator_guard),
         ("crop_x", options.crop_x),
         ("crop_y", options.crop_y),
         ("crop_zoom", options.zoom),
@@ -390,6 +399,8 @@ fn read_options(state: &Shared) -> Result<(String, Options), JsValue> {
             Order::Sharp
         },
         pad: number("pad")?.clamp(0.0, 255.0) as u8,
+        color_limit: number("color_limit")?.clamp(0.0, 16_384.0) as usize,
+        separator_guard: number("separator_guard")?,
         fit: match select("fit")?.value().as_str() {
             "crop" => FitMode::Crop,
             "stretch" => FitMode::Stretch,
@@ -675,13 +686,26 @@ fn present(state: &Shared, mosaic: Mosaic, elapsed: f64) -> Result<(), JsValue> 
         "result-label",
         &format!("{} colors · {:.1}s", parts.len(), elapsed / 1000.0),
     )?;
-    let metadata = format!(
+    let mut metadata = format!(
         "{} × {} · {} colors · built in {:.1} s",
         mosaic.width,
         mosaic.height,
         parts.len(),
         elapsed / 1000.0
     );
+    if !mosaic.overflow.is_empty() {
+        metadata.push_str(&format!(
+            " · ⚠ limit exceeded: {}",
+            mosaic
+                .overflow
+                .iter()
+                .map(|(index, excess)| format!("{} +{}", mosaic.palette[*index].name, excess))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    } else if input("color_limit").is_ok_and(|el| el.value() != "0") {
+        metadata.push_str(" · color cap satisfied");
+    }
     text("build-meta", &metadata)?;
     hidden("outputs", false)?;
     hidden("output-empty", true)?;
@@ -775,7 +799,8 @@ fn build(state: &Shared) -> Result<(), JsValue> {
                 if reply.get(0).as_string().as_deref() != Some("result") {
                     return Err(body.into());
                 }
-                let (grid, width, height, colors): (Vec<usize>, usize, usize, Vec<usize>) =
+                #[allow(clippy::type_complexity)] // worker wire format
+                let (grid, width, height, colors, overflow): WorkerReply =
                     serde_json::from_str(&body).map_err(|e| JsValue::from_str(&e.to_string()))?;
                 let palette = colors
                     .into_iter()
@@ -796,6 +821,7 @@ fn build(state: &Shared) -> Result<(), JsValue> {
                         width,
                         height,
                         palette,
+                        overflow,
                     },
                     js_sys::Date::now() - start,
                 )

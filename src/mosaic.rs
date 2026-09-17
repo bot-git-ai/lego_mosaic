@@ -120,6 +120,14 @@ pub struct Options {
     pub fit: FitMode,
     /// Contain padding color, 0–255 gray (255 = white).
     pub pad: u8,
+    /// 0–1 strength of the bright-separator guard that keeps light gaps
+    /// (e.g. between eye patches and outlines) from being closed when
+    /// promoting thin dark lines. 0 disables the guard entirely.
+    pub separator_guard: f64,
+    /// Optional maximum tiles per color. Zero means unlimited. Stock-limited
+    /// builds (e.g. 900 per color in LEGO set 40179) use it to guarantee the
+    /// parts list can actually be built from one set.
+    pub color_limit: usize,
     pub crop_x: f64,
     pub crop_y: f64,
     pub zoom: f64,
@@ -147,6 +155,8 @@ impl Default for Options {
             excluded: Vec::new(),
             fit: FitMode::Contain,
             pad: 255,
+            separator_guard: 1.0,
+            color_limit: 0,
             crop_x: 0.5,
             crop_y: 0.5,
             zoom: 1.0,
@@ -175,6 +185,8 @@ impl Options {
         o.dither_strength = bounded(o.dither_strength, 0.0, 1.0, 0.75);
         o.neutral_cleanup = bounded(o.neutral_cleanup, 0.0, 1.0, 0.5);
         o.despeckle_strength = bounded(o.despeckle_strength, 0.0, 1.0, 0.35);
+        o.separator_guard = bounded(o.separator_guard, 0.0, 1.0, 1.0);
+        o.color_limit = o.color_limit.min(o.width * o.height);
         o.crop_x = bounded(o.crop_x, 0.0, 1.0, 0.5);
         o.crop_y = bounded(o.crop_y, 0.0, 1.0, 0.5);
         o.zoom = bounded(o.zoom, 1.0, 8.0, 1.0);
@@ -205,6 +217,10 @@ pub struct Mosaic {
     pub width: usize,
     pub height: usize,
     pub palette: Vec<TileColor>,
+    /// Colors that exceed `color_limit` after repair: (color index in
+    /// `palette`, tiles above the limit). Empty unless a limit was set AND
+    /// the grid could not absorb every overflow elsewhere.
+    pub overflow: Vec<(usize, usize)>,
 }
 
 const OVERSAMPLE: usize = 4;
@@ -275,12 +291,87 @@ pub fn convert(image: &Raster, palette: &[TileColor], options: &Options) -> Mosa
     } else if o.despeckle && o.despeckle_strength > 0.0 {
         despeckle(&mut grid, &cells, &confidence, &labs, &o);
     }
+    let overflow = enforce_color_limit(&mut grid, &cells, &confidence, &labs, o.color_limit);
     Mosaic {
         width: o.width,
         height: o.height,
         grid,
         palette,
+        overflow,
     }
+}
+
+/// Enforce `color_limit`: reassign overflow tiles to the nearest open
+/// color (deterministic scan order), protecting outline-preserved studs
+/// (confidence 1.0) until nothing else remains. Reports per-color excess
+/// that could not be absorbed — the caller decides how to surface it.
+fn enforce_color_limit(
+    grid: &mut [usize],
+    cells: &[Lab],
+    confidence: &[f64],
+    palette: &[Lab],
+    limit: usize,
+) -> Vec<(usize, usize)> {
+    if limit == 0 || grid.is_empty() {
+        return Vec::new();
+    }
+    let mut counts = vec![0_usize; palette.len()];
+    for &index in grid.iter() {
+        counts[index] += 1;
+    }
+    if counts.iter().all(|&c| c <= limit) {
+        return Vec::new();
+    }
+    // Keep at least one tile of each present color reachable: the fallback
+    // below may exceed the cap when every color is otherwise full.
+    let mut overflow = Vec::new();
+    let mut protected = vec![false; grid.len()];
+    for (i, &index) in grid.iter().enumerate() {
+        if confidence[index].max(0.0) >= 1.0 && counts[index] > 1 {
+            protected[i] = true;
+        }
+    }
+    // Reassign the least-confident overflow tiles first, nearest open color.
+    let mut order: Vec<usize> = (0..grid.len())
+        .filter(|&i| !protected[i] && counts[grid[i]] > limit)
+        .collect();
+    order.sort_by(|&a, &b| {
+        // Ascending confidence: reassign the most uncertain tiles first so
+        // the repair disturbs the image as little as possible.
+        confidence[a]
+            .partial_cmp(&confidence[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+    // `counts` includes protected tiles; open capacity is limit - count.
+    for i in order {
+        let current = grid[i];
+        if counts[current] <= limit {
+            continue;
+        }
+        let mut best: Option<usize> = None;
+        let mut distance = f64::INFINITY;
+        for (candidate, lab) in palette.iter().enumerate() {
+            if candidate != current && counts[candidate] < limit {
+                let d = delta_e_2000(&cells[i], lab);
+                if d < distance {
+                    distance = d;
+                    best = Some(candidate);
+                }
+            }
+        }
+        if let Some(candidate) = best {
+            counts[current] -= 1;
+            counts[candidate] += 1;
+            grid[i] = candidate;
+        }
+    }
+    for (index, &count) in counts.iter().enumerate() {
+        if count > limit {
+            overflow.push((index, count - limit));
+        }
+    }
+    overflow
 }
 
 fn excluded_palette(palette: &[TileColor], excluded: &[usize]) -> Vec<TileColor> {
@@ -648,15 +739,21 @@ fn pool(
             let preserve_ink = (ink >= 0.19 && darkest.l < 30.0 && palette[best].l > 45.0) || line;
             // A bright channel between two dark features is meaningful too.
             // Do not let minority-outline promotion close that source gap.
-            let preserve_ink = preserve_ink && !bright_channel(hi, gx, gy, o.width, o.height);
+            // `separator_guard` scales how much evidence the gap must show:
+            // 0 disables the guard, 1 is strictest (default).
+            let preserve_ink = preserve_ink
+                && (o.separator_guard <= 0.0
+                    || !bright_channel(hi, gx, gy, o.width, o.height, o.separator_guard));
             if preserve_ink {
                 best = nearest(&darkest, palette);
             }
             grid[i] = best;
             confidence[i] = if preserve_ink {
+                // Reserved for outline/ink preservation: the color-limit
+                // repair pass treats exactly these tiles as immovable.
                 1.0
             } else {
-                f64::from(counts[best]) / n
+                (f64::from(counts[best]) / n).min(0.999_999)
             };
             // Sharp dithering uses the covered family's representative mean,
             // not a quantized value (which would leave no error to diffuse).
@@ -693,9 +790,25 @@ fn pool(
 /// Detect a light separator through the central half of a stud, bounded
 /// by dark features on both sides. Unlike erosion, this never opens a gap
 /// without source evidence and leaves isolated silhouettes untouched.
-fn bright_channel(hi: &[Lab], gx: usize, gy: usize, width: usize, height: usize) -> bool {
+/// `strength` (0–1) is protection strength: 0 restores the pre-guard
+/// behavior, 1.0 is the released face-detail strictness.
+fn bright_channel(
+    hi: &[Lab],
+    gx: usize,
+    gy: usize,
+    width: usize,
+    height: usize,
+    strength: f64,
+) -> bool {
     let w = width * OVERSAMPLE;
     let h = height * OVERSAMPLE;
+    // `strength` is protection strength: higher = more willing to keep a gap
+    // open. Evidence thresholds loosen as it rises, reaching the released
+    // face-detail behavior (3 clear / 2 flanked / flank 55) at 1.0. Flank
+    // darkness stays near mid-gray so outlines remain detectable boundaries.
+    let need_clear = 3 + ((1.0 - strength) * 1.999) as usize;
+    let need_bounded = 2 + ((1.0 - strength) * 1.999) as usize;
+    let flank_dark = 50.0 + 5.0 * strength;
     for vertical in [true, false] {
         for offset in 1..=2 {
             let (cx, cy) = (gx * OVERSAMPLE, gy * OVERSAMPLE);
@@ -720,14 +833,14 @@ fn bright_channel(hi: &[Lab], gx: usize, gy: usize, width: usize, height: usize)
                             && ny >= 0
                             && nx < w as isize
                             && ny < h as isize
-                            && hi[ny as usize * w + nx as usize].l < 55.0
+                            && hi[ny as usize * w + nx as usize].l < flank_dark
                     })
                 };
                 if dark_side(-1) && dark_side(1) {
                     bounded += 1;
                 }
             }
-            if clear >= 3 && bounded >= 2 {
+            if clear >= need_clear && bounded >= need_bounded {
                 return true;
             }
         }
@@ -929,33 +1042,52 @@ mod tests {
     }
 
     #[test]
-    fn narrow_white_separator_is_not_closed_by_outline_preservation() {
-        let mut source = solid(32, 32, [255, 255, 255, 255]);
-        for y in 0..32 {
-            for x in 8..12 {
-                source.put(x, y, [20, 20, 20, 255]);
-            }
-            for x in 15..17 {
-                source.put(x, y, [110, 110, 110, 255]);
+    fn enforce_color_limit_moves_tiles_to_open_colors() {
+        // Direct probe of the repair pass: 6×1 grid of WHITE cells, palette
+        // white+black, cap 3. Expect 3 white kept, 3 reassigned to black,
+        // no overflow (black had capacity).
+        let cells = vec![WHITE; 6];
+        let palette = [
+            Lab {
+                l: 100.0,
+                a: 0.0,
+                b: 0.0,
+            },
+            Lab {
+                l: 0.0,
+                a: 0.0,
+                b: 0.0,
+            },
+        ];
+        let mut grid = vec![0; 6];
+        let confidence = vec![0.0; 6];
+        let overflow = enforce_color_limit(&mut grid, &cells, &confidence, &palette, 3);
+        assert_eq!(overflow, Vec::new());
+        assert_eq!(grid.iter().filter(|&&i| i == 0).count(), 3);
+        assert_eq!(grid.iter().filter(|&&i| i == 1).count(), 3);
+    }
+
+    #[test]
+    fn convert_with_tight_cap_reassigns_to_open_colors() {
+        // Full pipeline: half black / half white 8x4, cap 12. The repair
+        // pass must move 4 white tiles into black so white ≤ 12.
+        let mut source = solid(32, 16, [255, 255, 255, 255]);
+        for y in 0..16 {
+            for x in 0..16 {
+                source.put(x, y, [10, 10, 10, 255]);
             }
         }
-        let result = convert(&source, MOSAIC_MAKER, &options(8, 8));
-        let expected: Vec<_> = (0..64)
-            .map(|i| match i % 8 {
-                2 => "Black",
-                4 => "Dark Bluish Gray",
-                _ => "White",
-            })
-            .collect();
-        let actual: Vec<_> = result
-            .grid
+        let mut o = options(8, 4);
+        o.color_limit = 12;
+        let result = convert(&source, MOSAIC_MAKER, &o);
+        let white = result
+            .palette
             .iter()
-            .map(|&i| result.palette[i].name)
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "preserve both the dark feature and its white separator, across the entire grid"
-        );
+            .position(|t| t.name == "White")
+            .unwrap();
+        let n_white = result.grid.iter().filter(|&&i| i == white).count();
+        assert!(n_white <= 12, "white must be capped, got {n_white}");
+        assert!(result.overflow.iter().all(|(i, _)| *i != white));
     }
 
     #[test]

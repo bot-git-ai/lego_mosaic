@@ -50,8 +50,14 @@ pub fn start() -> Result<(), JsValue> {
                         .expect("subset palette")
                 })
                 .collect();
-            serde_json::to_string(&(result.grid, result.width, result.height, colors))
-                .map_err(|e| e.to_string())
+            serde_json::to_string(&(
+                result.grid,
+                result.width,
+                result.height,
+                colors,
+                result.overflow,
+            ))
+            .map_err(|e| e.to_string())
         };
         let message = js_sys::Array::new();
         match run() {

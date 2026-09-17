@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub fn help() -> &'static str {
-    "LEGO Mosaic Studio\n  lego-mosaic [serve]\n  lego-mosaic convert IMAGE --output mosaic.svg [options]\n\n  --size N | --width N --height N     studs (1–192, default 48)\n  --palette mosaic-maker|monochrome|extended\n  --preset artwork|photo|natural|grayscale|yellow-accent\n  --recipe FILE    load JSON Options; flags override recipe\n  --save-recipe FILE    save effective Options JSON\n  --parts FILE.csv --guide FILE.svg\n  --studs         round tile SVG (default flat SVG)\n  --brightness N --contrast N --gamma N --saturation N\n  --fit contain|crop|stretch --pad N (0–255)\n  --outline-strength N    0–1, artwork only\n  --dither | --no-dither\n  --force         permit replacing existing output files\n\nPNG output is also supported: one pixel per stud, exact palette colors.\nPhoto/natural presets disable illustration recoloring. Recipes expose all\ncolor-family, crop and processing controls. Input PNG/JPEG/WebP/GIF; first frame."
+    "LEGO Mosaic Studio\n  lego-mosaic [serve]\n  lego-mosaic convert IMAGE --output mosaic.svg [options]\n\n  --size N | --width N --height N     studs (1–192, default 48)\n  --palette mosaic-maker|monochrome|extended\n  --preset artwork|photo|natural|grayscale|yellow-accent\n  --recipe FILE    load JSON Options; flags override recipe\n  --save-recipe FILE    save effective Options JSON\n  --parts FILE.csv --guide FILE.svg\n  --studs         round tile SVG (default flat SVG)\n  --brightness N --contrast N --gamma N --saturation N\n  --fit contain|crop|stretch --pad N (0–255)
+  --color-limit N   cap tiles per color (e.g. 900 for set 40179; 0=off)\n  --outline-strength N    0–1, artwork only\n  --dither | --no-dither\n  --force         permit replacing existing output files\n\nPNG output is also supported: one pixel per stud, exact palette colors.\nPhoto/natural presets disable illustration recoloring. Recipes expose all\ncolor-family, crop and processing controls. Input PNG/JPEG/WebP/GIF; first frame."
 }
 
 #[derive(Debug)]
@@ -49,6 +50,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
                 "outline-strength",
                 "fit",
                 "pad",
+                "color-limit",
             ]
             .contains(&key)
             {
@@ -134,6 +136,11 @@ fn parse(args: &[String]) -> Result<Request, String> {
             "stretch" => lego_mosaic::FitMode::Stretch,
             _ => return Err("Fit must be contain, crop or stretch".into()),
         };
+    }
+    if let Some(limit) = values.get("color-limit") {
+        options.color_limit = limit
+            .parse()
+            .map_err(|_| "Color limit must be a non-negative integer")?;
     }
     if let Some(pad) = values.get("pad") {
         options.pad = pad.parse().map_err(|_| "Pad must be 0–255")?;
@@ -314,6 +321,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
         mosaic.grid.len(),
         req.palette
     );
+    if !mosaic.overflow.is_empty() {
+        for (index, excess) in &mosaic.overflow {
+            eprintln!(
+                "warning: {} exceeds the {}-tile color cap by {} tiles",
+                mosaic.palette[*index].name, req.options.color_limit, excess
+            );
+        }
+    } else if req.options.color_limit > 0 {
+        eprintln!(
+            "color cap of {} tiles per color satisfied",
+            req.options.color_limit
+        );
+    }
     Ok(())
 }
 

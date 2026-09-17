@@ -24,7 +24,7 @@ there is no handwritten JavaScript application or raw-pointer conversion ABI.
 
 CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
 --size 64 --palette extended --preset photo --recipe o.json --save-recipe o.json
---studs --dither --force]`, PNG/SVG output, never overwrites input or existing
+--color-limit 900 --fit stretch --pad 0 --studs --dither --force]`, PNG/SVG output, never overwrites input or existing
 outputs without `--force`. It is a thin native I/O shell: every mosaic byte
 comes from the same public library (`lego_mosaic::convert`/`render`) the
 browser uses; `tests/browser_smoke.cjs` asserts byte-identical SVG between the
@@ -42,10 +42,10 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
 
 - `mosaic.rs`: bounded RGBA Raster → fractional-area resampling with contain or
   positioned/zoomed crop or independent-axis stretch, gray padding → configurable color adjustment/remapping → perceptual
-  matching. Sharp mode preserves dark feature coverage, but does not promote
-  minority dark pixels over a source-supported bright separator between dark
-  features (prevents eye patches merging with outlines); Smooth pools linear
-  light. Both support serpentine final-stud dithering. Conservative deterministic
+  matching. Sharp mode preserves dark feature coverage, but the configurable
+  `separator_guard` (0–1, default 1) can keep source-supported light gaps open
+  (prevents eye patches merging with outlines; 0 = old closing behavior);
+  Smooth pools linear light. Both support serpentine final-stud dithering. Conservative deterministic
   despeckling is skipped during dithering. Options serde defaults and bounds are
   in this file; dimensions sanitized 1–192 (UI allows 8–128).
 - `color.rs`: sRGB↔Lab building blocks and tested CIEDE2000 distance.

@@ -457,6 +457,7 @@ mod tests {
             height,
             grid,
             palette: MOSAIC_MAKER.to_vec(),
+            overflow: Vec::new(),
         }
     }
 
@@ -603,6 +604,7 @@ mod tests {
             height: 1,
             grid: vec![0, 1, 0],
             palette: vec![MOSAIC_MAKER[4], MOSAIC_MAKER[0]],
+            overflow: Vec::new(),
         };
         let csv = parts_csv(&mosaic);
         assert_eq!(csv.lines().count(), 3);
@@ -621,6 +623,7 @@ mod tests {
             width: 1,
             height: 1,
             grid: vec![0],
+            overflow: Vec::new(),
             palette: vec![crate::palette::TileColor {
                 name: "A & <B>, \"C\"",
                 rgb: crate::color::Srgb::new(0, 0, 0),
