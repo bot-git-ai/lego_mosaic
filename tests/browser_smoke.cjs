@@ -88,6 +88,7 @@ let browser;
  assert.match(await workerFailure.locator('#error').innerText(),/worker failed/i);await workerFailure.close();
  console.log('PASS worker startup error unlocks UI');
  // Installable, atomic-update PWA that rebuilds after an offline reload.
+ assert.equal(await page.locator('#separator_guard').inputValue(),'1','eye-gap guard defaults to full protection');
  assert.match(await page.locator('#offline-status').innerText(),/offline use/i);
  const manifest=await page.evaluate(async()=>await(await fetch('manifest.webmanifest')).text());
  assert.match(manifest,/"start_url":"\.\/"/);assert.match(manifest,/icon-512/);
@@ -104,6 +105,15 @@ let browser;
  await set('width',64);await page.click('#match-aspect');
  assert.equal(await page.locator('#height').inputValue(),'32');
  await build();console.log('PASS aspect-matched grid suggestion');
+ // Per-color cap: 900 (set 40179 stock) satisfied; impossible cap warns.
+ if(process.argv[2]){
+  await set('color_limit','900');await build();
+  assert.match(await page.locator('#build-meta').innerText(),/cap satisfied/);
+  await set('color_limit','100');await build();
+  assert.match(await page.locator('#build-meta').innerText(),/limit exceeded/);
+  await set('color_limit','0');await page.click('#reset');
+  console.log('PASS color cap satisfied and exceeded states');
+ }
  // Failure recovery must preserve the previous result and allow another build.
  await page.locator('#image').setInputFiles({name:'broken.png',mimeType:'image/png',buffer:Buffer.from('not an image')});await ready();assert.equal(await page.locator('#error').isVisible(),true);await build();
  assert.equal(errors.length,0,errors.join('\n'));
