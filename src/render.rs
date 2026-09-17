@@ -78,6 +78,14 @@ fn svg_start(width: u32, height: u32, title: &str) -> String {
 /// remain stable even when exclusions reorder the effective palette.
 /// The caller chooses SVG download or browser print/PDF scaling/pagination.
 pub fn guide_svg(mosaic: &Mosaic, cell: u32) -> String {
+    guide_svg_order(mosaic, cell, true)
+}
+
+/// Standalone guide with selectable build order. With `bottom_up = false`,
+/// row 1 is at the top and 16×16 sections are top-anchored; with `true`,
+/// row 1 and sections are bottom-anchored, matching [`guide_svg`].
+/// Only coordinates and section boundaries change: the picture stays upright.
+pub fn guide_svg_order(mosaic: &Mosaic, cell: u32, bottom_up: bool) -> String {
     let cell = cell.clamp(16, 128);
     let left = cell * 2;
     let top = cell * 4;
@@ -87,7 +95,12 @@ pub fn guide_svg(mosaic: &Mosaic, cell: u32) -> String {
     let legend_top = top + grid_h + cell * 3;
     let out_w = (grid_w + left * 2).max(800);
     let out_h = legend_top + parts.len() as u32 * 26 + 88;
-    let mut out = svg_start(out_w, out_h, "Mosaic build guide: row 1 at bottom");
+    let title = if bottom_up {
+        "Mosaic build guide: row 1 at bottom"
+    } else {
+        "Mosaic build guide: row 1 at top"
+    };
+    let mut out = svg_start(out_w, out_h, title);
     write!(out, "<rect width=\"{out_w}\" height=\"{out_h}\" fill=\"white\"/><g font-family=\"Arial, sans-serif\" fill=\"#17243a\">")
         .expect("writing to String cannot fail");
     text(
@@ -107,13 +120,17 @@ pub fn guide_svg(mosaic: &Mosaic, cell: u32) -> String {
         49,
         12,
         "start",
-        "Row 1 is at the bottom. Build left to right, then upward.",
+        if bottom_up {
+            "Row 1 is at the bottom. Build left to right, then upward."
+        } else {
+            "Row 1 is at the top. Build left to right, then downward."
+        },
     );
     // Text badges stay legible in monochrome print and on dark tile fills.
     write!(out, "<g transform=\"translate({left} {top})\">")
         .expect("writing to String cannot fail");
-    guide_cells(&mut out, mosaic, cell);
-    guide_coordinates(&mut out, mosaic, cell);
+    guide_cells(&mut out, mosaic, cell, bottom_up);
+    guide_coordinates(&mut out, mosaic, cell, bottom_up);
     out.push_str("</g>");
     text(
         &mut out,
@@ -177,14 +194,24 @@ pub fn guide_svg(mosaic: &Mosaic, cell: u32) -> String {
     out
 }
 
-fn guide_cells(out: &mut String, mosaic: &Mosaic, cell: u32) {
+// Map a zero-based visual row to its one-based build coordinate. This is also
+// the inverse mapping (minus one) from build order to visual row index.
+fn build_row_number(y: usize, height: usize, bottom_up: bool) -> usize {
+    if bottom_up {
+        height - y
+    } else {
+        y + 1
+    }
+}
+
+fn guide_cells(out: &mut String, mosaic: &Mosaic, cell: u32, bottom_up: bool) {
     for (i, &index) in mosaic.grid.iter().enumerate() {
         let tile = &mosaic.palette[index];
         let x = (i % mosaic.width) as u32 * cell;
         let y = (i / mosaic.width) as u32 * cell;
         let cx = x + cell / 2;
         let cy = y + cell / 2;
-        write!(out, "<g data-column=\"{}\" data-row=\"{}\" data-color=\"{}\"><rect x=\"{x}\" y=\"{y}\" width=\"{cell}\" height=\"{cell}\" fill=\"{}\" stroke=\"#999\" stroke-width=\"0.5\"/>", i % mosaic.width + 1, mosaic.height - i / mosaic.width, xml_escape(&tile.id()), tile.hex())
+        write!(out, "<g data-column=\"{}\" data-row=\"{}\" data-color=\"{}\"><rect x=\"{x}\" y=\"{y}\" width=\"{cell}\" height=\"{cell}\" fill=\"{}\" stroke=\"#999\" stroke-width=\"0.5\"/>", i % mosaic.width + 1, build_row_number(i / mosaic.width, mosaic.height, bottom_up), xml_escape(&tile.id()), tile.hex())
             .expect("writing to String cannot fail");
         let badge_w = cell * 3 / 4;
         let badge_h = cell * 3 / 5;
@@ -202,7 +229,7 @@ fn guide_cells(out: &mut String, mosaic: &Mosaic, cell: u32) {
     }
 }
 
-fn guide_coordinates(out: &mut String, mosaic: &Mosaic, cell: u32) {
+fn guide_coordinates(out: &mut String, mosaic: &Mosaic, cell: u32, bottom_up: bool) {
     let w = mosaic.width as u32 * cell;
     let h = mosaic.height as u32 * cell;
     let font = cell * 2 / 5;
@@ -219,20 +246,14 @@ fn guide_coordinates(out: &mut String, mosaic: &Mosaic, cell: u32) {
     }
     for y in 0..mosaic.height {
         let cy = y as u32 * cell + cell / 2 + cell / 7;
+        let row = build_row_number(y, mosaic.height, bottom_up);
         write!(
             out,
             "<text x=\"-8\" y=\"{cy}\" font-size=\"{font}\" text-anchor=\"end\">{}</text>",
-            mosaic.height - y
+            row
         )
         .expect("writing to String cannot fail");
-        text(
-            out,
-            w + 8,
-            cy,
-            font,
-            "start",
-            &(mosaic.height - y).to_string(),
-        );
+        text(out, w + 8, cy, font, "start", &row.to_string());
     }
     out.push_str(
         "<g class=\"section-boundaries\" stroke=\"#17243a\" stroke-width=\"2\" fill=\"none\">",
@@ -242,7 +263,7 @@ fn guide_coordinates(out: &mut String, mosaic: &Mosaic, cell: u32) {
         write!(out, "<path d=\"M{x} 0V{h}\"/>").expect("writing to String cannot fail");
     }
     for row in (16..mosaic.height).step_by(16) {
-        let y = (mosaic.height - row) as u32 * cell;
+        let y = if bottom_up { mosaic.height - row } else { row } as u32 * cell;
         write!(out, "<path d=\"M0 {y}H{w}\"/>").expect("writing to String cannot fail");
     }
     write!(out, "<rect width=\"{w}\" height=\"{h}\"/></g>").expect("writing to String cannot fail");
@@ -329,8 +350,16 @@ pub fn parts_list(mosaic: &Mosaic) -> Vec<PartCount> {
 /// what the builder places stud by stud from bottom to top (like LEGO
 /// instructions, row 1 is the bottom of the mosaic).
 pub fn build_rows(mosaic: &Mosaic) -> Vec<Vec<(String, String)>> {
+    build_rows_order(mosaic, true)
+}
+
+/// Color-name/hex pairs in build order, always left to right within each row.
+/// `bottom_up = false` follows the picture from top to bottom; `true` starts
+/// at the bottom, matching [`build_rows`]. The source mosaic is never modified.
+pub fn build_rows_order(mosaic: &Mosaic, bottom_up: bool) -> Vec<Vec<(String, String)>> {
     let mut rows = Vec::with_capacity(mosaic.height);
-    for y in (0..mosaic.height).rev() {
+    for row_index in 0..mosaic.height {
+        let y = build_row_number(row_index, mosaic.height, bottom_up) - 1;
         let row = (0..mosaic.width)
             .map(|x| {
                 let tile = &mosaic.palette[mosaic.grid[y * mosaic.width + x]];
@@ -464,6 +493,107 @@ mod tests {
         assert!(svg.contains("<path d=\"M384 0V480\"/>"));
         assert!(svg.contains("<path d=\"M0 96H432\"/>"));
         assert!(!svg.contains("<path d=\"M0 384H432\"/>"));
+    }
+
+    #[test]
+    fn selectable_order_keeps_guide_upright_and_matches_build_rows() {
+        // Asymmetric rows and columns make either vertical or horizontal flips visible.
+        let mosaic = fixture(2, 3, vec![0, 4, 1, 2, 3, 0]);
+        let original_grid = mosaic.grid.clone();
+        for bottom_up in [false, true] {
+            let svg = guide_svg_order(&mosaic, 24, bottom_up);
+            let rows = build_rows_order(&mosaic, bottom_up);
+            assert_eq!(rows.len(), mosaic.height);
+            assert!(rows.iter().all(|row| row.len() == mosaic.width));
+            assert_eq!(svg.matches("data-column=").count(), mosaic.grid.len());
+            assert_eq!(svg.matches("transform=").count(), 1);
+            assert!(svg.contains("<g transform=\"translate(48 96)\">"));
+            for (i, &index) in mosaic.grid.iter().enumerate() {
+                let x = i % mosaic.width;
+                let y = i / mosaic.width;
+                let row = if bottom_up { mosaic.height - y } else { y + 1 };
+                let tile = mosaic.palette[index];
+                // The same source tile has the same visual position in both modes.
+                assert!(svg.contains(&format!(
+                    "<g data-column=\"{}\" data-row=\"{row}\" data-color=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"24\" height=\"24\" fill=\"{}\"",
+                    x + 1, tile.id(), x * 24, y * 24, tile.hex()
+                )));
+                assert_eq!(rows[row - 1][x], (tile.name.to_string(), tile.hex()));
+                let cy = y * 24 + 15;
+                assert!(svg.contains(&format!(
+                    "<text x=\"-8\" y=\"{cy}\" font-size=\"9\" text-anchor=\"end\">{row}</text>"
+                )));
+                assert!(svg.contains(&format!(
+                    "<text x=\"56\" y=\"{cy}\" font-size=\"9\" text-anchor=\"start\">{row}</text>"
+                )));
+            }
+            for x in 0..mosaic.width {
+                let cx = x * 24 + 12;
+                for y in ["-8", "96"] {
+                    assert!(svg.contains(&format!(
+                        "<text x=\"{cx}\" y=\"{y}\" font-size=\"9\" text-anchor=\"middle\">{}</text>",
+                        x + 1
+                    )));
+                }
+            }
+            let (edge, direction) = if bottom_up {
+                ("bottom", "upward")
+            } else {
+                ("top", "downward")
+            };
+            assert!(svg.contains(&format!(
+                "<title>Mosaic build guide: row 1 at {edge}</title>"
+            )));
+            assert!(svg.contains(&format!(
+                "Row 1 is at the {edge}. Build left to right, then {direction}."
+            )));
+        }
+        let top_down = build_rows_order(&mosaic, false);
+        let mut bottom_up = build_rows_order(&mosaic, true);
+        bottom_up.reverse();
+        assert_eq!(top_down, bottom_up);
+        assert_eq!(mosaic.grid, original_grid);
+    }
+
+    #[test]
+    fn selectable_sections_follow_numbered_rows_including_partial_sections() {
+        for height in [1, 16, 17, 20, 32, 35] {
+            let mosaic = fixture(18, height, vec![0; 18 * height]);
+            for bottom_up in [false, true] {
+                let svg = guide_svg_order(&mosaic, 24, bottom_up);
+                assert!(svg.contains(&format!("<path d=\"M384 0V{}\"/>", height * 24)));
+                let boundaries = svg.split("class=\"section-boundaries\"").nth(1).unwrap();
+                assert_eq!(boundaries.matches("<path").count(), 1 + (height - 1) / 16);
+                for y in 1..height {
+                    let rows_from_start = if bottom_up { height - y } else { y };
+                    assert_eq!(
+                        boundaries.contains(&format!("<path d=\"M0 {}H432\"/>", y * 24)),
+                        rows_from_start % 16 == 0,
+                        "height={height}, y={y}, bottom_up={bottom_up}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_wrappers_match_bottom_up_order_and_cell_clamping() {
+        for height in [1, 3, 20] {
+            let mosaic = fixture(2, height, (0..2 * height).map(|i| i % 5).collect());
+            assert_eq!(build_rows(&mosaic), build_rows_order(&mosaic, true));
+            for cell in [0, 16, 24, 128, u32::MAX] {
+                assert_eq!(
+                    guide_svg(&mosaic, cell),
+                    guide_svg_order(&mosaic, cell, true)
+                );
+                for bottom_up in [false, true] {
+                    assert_eq!(
+                        guide_svg_order(&mosaic, cell, bottom_up),
+                        guide_svg_order(&mosaic, cell.clamp(16, 128), bottom_up)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # lego_mosaic (`lego_mosaic/`)
 
 Mosaic Studio: private browser-side picture → LEGO tile mosaic. Both conversion
-and application behavior are Rust. The native binary is only a static HTTP host.
+and application behavior are Rust. The native binary provides a static HTTP host and shared-core CLI.
 Images are not uploaded or persisted. Gateway mounts this app at `/lego-mosaic/`.
 
 ## Build and run
@@ -18,7 +18,8 @@ cargo build --release --locked
 `assets/mosaic_bg.wasm`. BOTH are committed and embedded in the native binary.
 Rebuild them after any browser/core/palette/render change, BEFORE building the
 server. No npm/JS build tool is needed. A tiny dynamic-import loader in ui.html
-and generated wasm-bindgen platform bindings are the only JavaScript in the app;
+plus a worker bootstrap, small service-worker cache/lifecycle shell and generated
+wasm-bindgen platform bindings are the only JavaScript in the app;
 there is no handwritten JavaScript application or raw-pointer conversion ABI.
 
 CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
@@ -32,14 +33,15 @@ two front ends. `tests/cli_smoke.py` checks exact expected SVG bytes via a
 
 Server: `target/release/lego-mosaic`, default `127.0.0.1:3210`, override
 `LEGO_MOSAIC_ADDR`. Unit `lego-mosaic.service`. Routes are prefix-free:
-`/`, `/mosaic.js`, `/mosaic_bg.wasm`, `/healthz`; GET only. Release with Cobalt,
+`/`, `/mosaic.js`, `/mosaic_bg.wasm`, `/worker.js`, `/service-worker.js`,
+`/manifest.webmanifest`, `/icon-192.png`, `/icon-512.png`, `/healthz`; GET only. Release with Cobalt,
 then `sudo systemctl restart lego-mosaic.service`. Gateway strips the app prefix.
 Bounded HTTP connection count and I/O deadlines; assets are served no-store.
 
 ## Code map
 
 - `mosaic.rs`: bounded RGBA Raster → fractional-area resampling with contain or
-  positioned/zoomed crop → configurable color adjustment/remapping → perceptual
+  positioned/zoomed crop or independent-axis stretch, gray padding → configurable color adjustment/remapping → perceptual
   matching. Sharp mode preserves dark feature coverage; Smooth pools linear
   light. Both support serpentine final-stud dithering. Conservative deterministic
   despeckling is skipped during dithering. Options serde defaults and bounds are
@@ -50,13 +52,20 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
   approximations, NOT verified color/part stock. Part 98138 is a round TILE.
   Stable app IDs and two-digit symbols are not manufacturer numeric IDs.
 - `render.rs`: exact-color flat SVG, round-tile SVG, numbered vector build guide,
-  CSV, counts and bottom-up rows. All output symbols use TileColor::symbol(),
+  CSV, counts and explicit top-down/bottom-up row helpers. Web defaults top-down;
+  legacy API/CLI guide remains bottom-up. SVG picture orientation never changes. All output symbols use TileColor::symbol(),
   never count-sorted or post-exclusion indices.
 - `cli.rs`: native argument parsing, image decode (bounded `image` crate),
   output-path collision checks and atomic-ish writes; no conversion logic.
 - `browser.rs`: wasm-only Rust web-sys DOM/events, image decode/canvas, presets,
   palette exclusions, errors, original/converted previews, exports and print.
   Busy state serializes decode/build; changing settings marks old outputs stale.
+- `worker.rs`: Rust dedicated-worker protocol and conversion; transferable pixels,
+  per-job termination, startup error handling, 120s timeout and cancellation.
+- `service-worker.js`: caches only a fixed app-shell allowlist, scope-specific
+  content-versioned cache, atomic install, no skipWaiting/mixed-version updates.
+  Offline needs one successful online visit over HTTPS/localhost. Browser cache
+  eviction or clearing site data removes offline support. Photos are never cached.
 - `ui.html`, `ui.rs`: accessible responsive static shell and loader-failure UI.
 - `main.rs`, `server.rs`: static host, no image API.
 
@@ -89,16 +98,17 @@ PLAYWRIGHT_MODULE=/path/to/playwright-core node tests/browser_smoke.cjs [image.p
 Browser test needs externally installed playwright-core and Chromium (default
 `/usr/bin/chromium`, override `CHROMIUM`). It starts/stops its OWN test server at
 3333; alternatively `MOSAIC_TEST_URL` tests an existing host. Tests known-image
-conversion, bottom-up rows, stable symbols, SVG/CSV downloads, persistent
+conversion, both row directions, worker heartbeat/cancel/error recovery, offline
+reload with worker conversion, aspect-matched grid, stable symbols, SVG/CSV downloads, persistent
 exclusions, all-excluded guard, decode recovery and module-load errors. Optional
 image also tests family remapping, dithering, 128×128 build, mobile layout and
 local-only requests. Private test images must NOT be committed.
 
 ## Known limitations
 
-- UI computation is main-thread wasm; large builds pause interaction after the
-  busy state paints. Tested 128×128 extended photo took ~5.9s including rendering
-  in Pi Chromium. Worker/cancellation would be a future improvement.
+- Conversion runs in a dedicated worker; main-thread image decode/copy and final
+  DOM/SVG presentation can still cause short pauses. Worker cancellation is real,
+  but does not interrupt native browser image decoding. Worker is fresh per build.
 - Retained canvas/preview max side 2048; files capped 40 MiB and decoded images
   over 32 MP rejected. Browser decoding occurs before dimensions are known, so
   this is NOT an absolute peak decode-memory guarantee.
@@ -108,3 +118,9 @@ local-only requests. Private test images must NOT be committed.
 
 Warnings are denied. Native tests use the same Rust core; browser end-to-end
 checks are essential because native tests cannot prove DOM/loader integration.
+
+Real-photo QA: `PLAYWRIGHT_MODULE=/path/to/playwright-core node tests/photo_smoke.cjs
+/path/to/astronaut.png /path/to/coffee.png`. Uses its own port 3334, compares whole
+CLI and worker SVG strings for contain/crop/stretch at 64×64, captures previews.
+Sample sources: scikit-image v0.19.3 data/astronaut.png (NASA), coffee.png (Rachel
+Michetti). Download public samples separately; do not commit personal photos.

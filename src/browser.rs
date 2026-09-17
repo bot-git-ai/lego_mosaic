@@ -17,7 +17,7 @@ use web_sys::{
     HtmlInputElement, HtmlSelectElement, ImageBitmap, Url,
 };
 
-use crate::mosaic::{self, FitMode, HueMode, Mosaic, Options, Order, Raster};
+use crate::mosaic::{FitMode, HueMode, Mosaic, Options, Order, Raster};
 use crate::{palette, render};
 
 type Shared = Rc<RefCell<App>>;
@@ -34,6 +34,13 @@ struct App {
     mosaic_url: Option<String>,
     exclusions: BTreeMap<String, BTreeSet<usize>>,
     busy: bool,
+    job: u64,
+    worker: Option<web_sys::Worker>,
+    worker_message: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
+    worker_error: Option<Closure<dyn FnMut(Event)>>,
+    timeout: Option<i32>,
+    timer_callback: Option<Closure<dyn FnMut()>>,
+    elapsed: f64,
 }
 
 fn document() -> Result<Document, JsValue> {
@@ -192,6 +199,7 @@ fn swatches(state: &Shared) -> Result<(), JsValue> {
 }
 
 fn update_labels() -> Result<(), JsValue> {
+    text("pad-v", &format!("{:.0}", number("pad")?))?;
     for id in ["contrast", "saturation", "gamma", "crop_zoom"] {
         text(&format!("{id}-v"), &format!("{:.2}×", number(id)?))?;
     }
@@ -295,6 +303,7 @@ fn apply_preset(state: &Shared, preset: &str, reset: bool) -> Result<(), JsValue
         "sharp"
     });
     select("fit")?.set_value("contain");
+    input("pad")?.set_value("255");
     select("hue_mode")?.set_value(match options.hue_remap.mode {
         HueMode::Auto => "auto",
         HueMode::Preserve => "preserve",
@@ -380,10 +389,11 @@ fn read_options(state: &Shared) -> Result<(String, Options), JsValue> {
         } else {
             Order::Sharp
         },
-        fit: if select("fit")?.value() == "crop" {
-            FitMode::Crop
-        } else {
-            FitMode::Contain
+        pad: number("pad")?.clamp(0.0, 255.0) as u8,
+        fit: match select("fit")?.value().as_str() {
+            "crop" => FitMode::Crop,
+            "stretch" => FitMode::Stretch,
+            _ => FitMode::Contain,
         },
         excluded: state
             .borrow()
@@ -597,7 +607,16 @@ fn present(state: &Shared, mosaic: Mosaic, elapsed: f64) -> Result<(), JsValue> 
     } else {
         render::stud_svg(&mosaic, 20)
     };
-    let guide = render::guide_svg(&mosaic, 24);
+    let bottom_up = select("row_order")?.value() == "bottom";
+    text(
+        "row-note",
+        if bottom_up {
+            "Row 1 is the bottom. Build left to right, then upward."
+        } else {
+            "Row 1 is the top. Build left to right, then downward."
+        },
+    )?;
+    let guide = render::guide_svg_order(&mosaic, 24, bottom_up);
     let url = blob_url(&svg, "image/svg+xml")?;
     element("mosaic-image")?
         .dyn_into::<HtmlImageElement>()?
@@ -626,7 +645,10 @@ fn present(state: &Shared, mosaic: Mosaic, elapsed: f64) -> Result<(), JsValue> 
         let _ = write!(rows, "<th scope=\"col\">{x}</th>");
     }
     rows.push_str("</tr></thead><tbody>");
-    for (i, row) in render::build_rows(&mosaic).iter().enumerate() {
+    for (i, row) in render::build_rows_order(&mosaic, bottom_up)
+        .iter()
+        .enumerate()
+    {
         let _ = write!(rows, "<tr><th scope=\"row\">{}</th>", i + 1);
         for (x, (name, hex)) in row.iter().enumerate() {
             let symbol = mosaic
@@ -667,6 +689,7 @@ fn present(state: &Shared, mosaic: Mosaic, elapsed: f64) -> Result<(), JsValue> 
     if let Some(old) = app.mosaic_url.replace(url) {
         let _ = Url::revoke_object_url(&old);
     }
+    app.elapsed = elapsed;
     app.mosaic = Some(mosaic);
     app.svg = svg;
     app.guide = guide;
@@ -693,42 +716,159 @@ fn build(state: &Shared) -> Result<(), JsValue> {
     if options.excluded.len() >= tiles.len() {
         return Err(JsValue::from_str("Keep at least one color enabled."));
     }
+    // Retain the source for future builds. Transfer a single copy to the worker.
+    let request = {
+        let app = state.borrow();
+        let image = app
+            .raster
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Choose an image"))?;
+        let pixels = js_sys::Uint8Array::from(image.pixels.as_slice());
+        let array = js_sys::Array::new();
+        array.push(
+            &serde_json::to_string(&(image.width, image.height, &palette_id, &options))
+                .map_err(|e| JsValue::from_str(&e.to_string()))?
+                .into(),
+        );
+        array.push(&pixels.buffer());
+        array
+    };
+    let config = web_sys::WorkerOptions::new();
+    config.set_type(web_sys::WorkerType::Module);
+    let worker = web_sys::Worker::new_with_options("./worker.js", &config)?;
     set_busy(
         state,
         true,
-        "Building with Rust… Larger mosaics may take a few seconds.",
+        "Building in a background worker… You can cancel.",
     )?;
-    let state = Rc::clone(state);
-    spawn_local(async move {
-        let result = async {
-            yield_to_browser().await?;
-            let start = js_sys::Date::now();
-            let mosaic = {
-                let app = state.borrow();
-                let image = app
-                    .raster
-                    .as_ref()
-                    .ok_or_else(|| JsValue::from_str("Choose an image first"))?;
-                mosaic::convert(image, tiles, &options)
+    hidden("cancel", false)?;
+    let job = {
+        let mut app = state.borrow_mut();
+        app.job += 1;
+        app.job
+    };
+    let start = js_sys::Date::now();
+    let weak = Rc::downgrade(state);
+    let send = worker.clone();
+    let handler =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            let Some(state) = weak.upgrade() else {
+                return;
             };
-            present(&state, mosaic, js_sys::Date::now() - start)
-        }
-        .await;
-        let _ = set_busy(
-            &state,
-            false,
-            if result.is_ok() {
-                "Mosaic ready. Save the SVG, download your parts, or print the guide."
-            } else {
-                "Build failed. Adjust your settings and try again."
-            },
-        );
-        let _ = update_labels();
-        if let Err(error) = result {
-            show_error(error);
+            if state.borrow().job != job || state.borrow().worker.is_none() {
+                return;
+            }
+            if event.data().as_string().as_deref() == Some("ready") {
+                let transfer = js_sys::Array::new();
+                transfer.push(&request.get(1));
+                if let Err(error) = send.post_message_with_transfer(&request, &transfer) {
+                    finish_worker(&state, Some(error));
+                }
+                return;
+            }
+            let result = (|| -> Result<(), JsValue> {
+                let reply = js_sys::Array::from(&event.data());
+                let body = reply
+                    .get(1)
+                    .as_string()
+                    .ok_or_else(|| JsValue::from_str("Malformed worker response"))?;
+                if reply.get(0).as_string().as_deref() != Some("result") {
+                    return Err(body.into());
+                }
+                let (grid, width, height, colors): (Vec<usize>, usize, usize, Vec<usize>) =
+                    serde_json::from_str(&body).map_err(|e| JsValue::from_str(&e.to_string()))?;
+                let palette = colors
+                    .into_iter()
+                    .map(|i| {
+                        tiles
+                            .get(i)
+                            .copied()
+                            .ok_or_else(|| JsValue::from_str("Invalid worker palette"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if grid.len() != width * height || grid.iter().any(|&i| i >= palette.len()) {
+                    return Err("Invalid worker grid".into());
+                }
+                present(
+                    &state,
+                    Mosaic {
+                        grid,
+                        width,
+                        height,
+                        palette,
+                    },
+                    js_sys::Date::now() - start,
+                )
+            })();
+            finish_worker(&state, result.err());
+        });
+    let weak = Rc::downgrade(state);
+    let error = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        event.prevent_default();
+        if let Some(state) = weak.upgrade() {
+            if state.borrow().job == job {
+                finish_worker(&state,Some("Background worker failed to load or run. Retry the build or reload the app.".into()));
+            }
         }
     });
+    let weak = Rc::downgrade(state);
+    let timer = Closure::<dyn FnMut()>::new(move || {
+        if let Some(state) = weak.upgrade() {
+            if state.borrow().job == job {
+                finish_worker(
+                    &state,
+                    Some("Build timed out. Try a smaller image or grid.".into()),
+                );
+            }
+        }
+    });
+    worker.set_onmessage(Some(handler.as_ref().unchecked_ref()));
+    worker.set_onerror(Some(error.as_ref().unchecked_ref()));
+    worker.set_onmessageerror(Some(error.as_ref().unchecked_ref()));
+    let timeout = web_sys::window()
+        .ok_or_else(|| JsValue::from_str("Window unavailable"))?
+        .set_timeout_with_callback_and_timeout_and_arguments_0(
+            timer.as_ref().unchecked_ref(),
+            120_000,
+        )?;
+    let mut app = state.borrow_mut();
+    app.worker = Some(worker);
+    app.worker_message = Some(handler);
+    app.worker_error = Some(error);
+    app.timeout = Some(timeout);
+    app.timer_callback = Some(timer);
     Ok(())
+}
+
+fn finish_worker(state: &Shared, error: Option<JsValue>) {
+    {
+        let mut app = state.borrow_mut();
+        if let Some(worker) = app.worker.take() {
+            worker.set_onmessage(None);
+            worker.set_onerror(None);
+            worker.set_onmessageerror(None);
+            worker.terminate();
+        }
+        if let Some(id) = app.timeout.take() {
+            if let Some(window) = web_sys::window() {
+                window.clear_timeout_with_handle(id);
+            }
+        }
+        // Keep closures until the next job: completion may be executing one.
+    }
+    let _ = hidden("cancel", true);
+    let _ = set_busy(
+        state,
+        false,
+        if error.is_some() {
+            "Build failed. Try again."
+        } else {
+            "Mosaic ready. Save your mosaic, parts or guide."
+        },
+    );
+    if let Some(error) = error {
+        show_error(error);
+    }
 }
 
 fn apply_zoom() -> Result<(), JsValue> {
@@ -780,9 +920,60 @@ fn download(state: &Shared, which: Export) -> Result<(), JsValue> {
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
+    if web_sys::window().is_none() {
+        return crate::worker::start();
+    }
+    spawn_local(async {
+        let result = async {
+            let window = web_sys::window().ok_or_else(||JsValue::from_str("Window unavailable"))?;
+            let container = window.navigator().service_worker();
+            JsFuture::from(container.register("./service-worker.js")).await?;
+            JsFuture::from(container.ready()?).await?;
+            text("offline-status", "Ready for offline use. Install Mosaic Studio from your browser menu. Only app assets are cached; images stay in memory.")
+        }.await;
+        if result.is_err() {
+            let _=text("offline-status","Offline setup unavailable. Online conversion still works locally; offline installation needs HTTPS or localhost.");
+        }
+    });
     let state = Rc::new(RefCell::new(App::default()));
     populate_palettes()?;
     apply_preset(&state, "artwork", true)?;
+    let app = Rc::clone(&state);
+    listen("match-aspect", "click", move |_| {
+        let height = {
+            let state = app.borrow();
+            let image = state
+                .raster
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("Choose an image first"))?;
+            (number("width")? * image.height as f64 / image.width as f64)
+                .round()
+                .clamp(8.0, 128.0)
+        };
+        input("height")?.set_value(&height.to_string());
+        update_labels()?;
+        mark_pending(&app)
+    })?;
+    let app = Rc::clone(&state);
+    listen("cancel", "click", move |_| {
+        app.borrow_mut().job += 1;
+        finish_worker(&app, None);
+        text(
+            "status",
+            "Build cancelled. Previous result retained; change settings and rebuild.",
+        )
+    })?;
+    let app = Rc::clone(&state);
+    listen("row_order", "change", move |_| {
+        let (mosaic, elapsed) = {
+            let mut state = app.borrow_mut();
+            (state.mosaic.take(), state.elapsed)
+        };
+        if let Some(mosaic) = mosaic {
+            present(&app, mosaic, elapsed)?;
+        }
+        Ok(())
+    })?;
     let app = Rc::clone(&state);
     listen("image", "change", move |_| {
         if let Some(file) = input("image")?.files().and_then(|f| f.get(0)) {

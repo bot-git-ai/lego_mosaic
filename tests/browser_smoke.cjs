@@ -34,9 +34,12 @@ let browser;
  async function svg(){return page.locator('#mosaic-image').evaluate(async i=>await(await fetch(i.src)).text());}
  await set('width',8);await set('height',8);await build();
  assert.equal(await page.locator('#rows td').count(),64);
+ assert.equal(await page.locator('#rows tbody tr').first().locator('td span').first().innerText(),'06');
+ assert.equal(await page.locator('#rows tbody tr').last().locator('td span').first().innerText(),'01');
+ await set('row_order','bottom');
  assert.equal(await page.locator('#rows tbody tr').first().locator('td span').first().innerText(),'01');
- assert.equal(await page.locator('#rows tbody tr').last().locator('td span').first().innerText(),'06');
- console.log('PASS known image, correct 32/32 count, bottom-up guide');
+ await set('row_order','top');
+ console.log('PASS known image, correct 32/32 count, top-down and bottom-up guide');
  const artifactDir=await fs.mkdtemp(path.join(os.tmpdir(),'mosaic-artifacts-'));
  async function save(id,name){const pending=page.waitForEvent('download');await page.click('#'+id);const d=await pending;assert.equal(d.suggestedFilename(),name);const file=path.join(artifactDir,name);await d.saveAs(file);assert.equal(await d.failure(),null);return await fs.readFile(file,'utf8');}
  let csv=await save('export-csv','mosaic-parts.csv');assert.match(csv,/"black","06".*"32"/);assert.match(csv,/"white","01".*"32"/);
@@ -68,12 +71,45 @@ let browser;
   await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(artifactDir,'studio-mobile.png'),fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
   console.log('PASS family rules, photo dithering, styles, max dimensions and mobile layout');
  }
+ // A long background build must allow main-thread timers and cancellation.
+ await page.click('#reset');await set('preset','photo');await set('width',128);await set('height',128);
+ await page.evaluate(()=>{window.workerTicks=0;window.workerTimer=setInterval(()=>window.workerTicks++,10);});
+ await page.click('#go');await page.waitForTimeout(150);
+ assert.ok(await page.evaluate(()=>window.workerTicks)>2,'main-thread heartbeat during conversion');
+ await page.click('#cancel');await ready();assert.match(await page.locator('#status').innerText(),/cancelled/);
+ await page.evaluate(()=>clearInterval(window.workerTimer));
+ await set('width',16);await set('height',16);await build();
+ console.log('PASS worker heartbeat, cancellation, subsequent rebuild');
+ const workerFailure=await browser.newPage({serviceWorkers:"block"});await workerFailure.route('**/worker.js',r=>r.abort());await workerFailure.goto(base);
+ await workerFailure.waitForFunction(()=>!document.querySelector('#settings').disabled);
+ await workerFailure.evaluate(async()=>{const c=document.createElement('canvas');c.width=8;c.height=8;const b=await new Promise(r=>c.toBlob(r));const d=new DataTransfer();d.items.add(new File([b],'test.png',{type:'image/png'}));document.querySelector('#image').files=d.files;document.querySelector('#image').dispatchEvent(new Event('change',{bubbles:true}));});
+ await workerFailure.waitForFunction(()=>!document.querySelector('#settings').disabled);await workerFailure.click('#go');
+ await workerFailure.waitForFunction(()=>!document.querySelector('#error').hidden&&!document.querySelector('#settings').disabled);
+ assert.match(await workerFailure.locator('#error').innerText(),/worker failed/i);await workerFailure.close();
+ console.log('PASS worker startup error unlocks UI');
+ // Installable, atomic-update PWA that rebuilds after an offline reload.
+ assert.match(await page.locator('#offline-status').innerText(),/offline use/i);
+ const manifest=await page.evaluate(async()=>await(await fetch('manifest.webmanifest')).text());
+ assert.match(manifest,/"start_url":"\.\/"/);assert.match(manifest,/icon-512/);
+ assert.ok((await (await fetch(new URL('service-worker.js',base))).text()).includes('mosaic-studio'));
+ await page.evaluate(async()=>{await navigator.serviceWorker.ready;await new Promise(r=>setTimeout(r,150));});
+ await page.context().setOffline(true);await page.reload();await ready();
+ await page.evaluate(async()=>{const c=document.createElement('canvas');c.width=16;c.height=8;const x=c.getContext('2d');x.fillStyle='black';x.fillRect(0,0,16,8);const b=await new Promise(r=>c.toBlob(r));const d=new DataTransfer();d.items.add(new File([b],'offline.png',{type:'image/png'}));document.querySelector('#image').files=d.files;document.querySelector('#image').dispatchEvent(new Event('change',{bubbles:true}));});await ready();
+ await build();assert.match(await svg(),/<rect/);
+ console.log('PASS offline reload serves app and builds mosaic');
+ await page.context().setOffline(false);
+ console.log('PASS PWA manifest, service worker and offline rebuild');
+ // Grid suggested from image proportions.
+ await page.click('#reset');await page.evaluate(async()=>{const c=document.createElement('canvas');c.width=32;c.height=16;const b=await new Promise(r=>c.toBlob(r));const d=new DataTransfer();d.items.add(new File([b],'wide.png',{type:'image/png'}));document.querySelector('#image').files=d.files;document.querySelector('#image').dispatchEvent(new Event('change',{bubbles:true}));});await ready();
+ await set('width',64);await page.click('#match-aspect');
+ assert.equal(await page.locator('#height').inputValue(),'32');
+ await build();console.log('PASS aspect-matched grid suggestion');
  // Failure recovery must preserve the previous result and allow another build.
  await page.locator('#image').setInputFiles({name:'broken.png',mimeType:'image/png',buffer:Buffer.from('not an image')});await ready();assert.equal(await page.locator('#error').isVisible(),true);await build();
  assert.equal(errors.length,0,errors.join('\n'));
  assert.equal(requests.some(([method])=>method!=='GET'),false,'No uploads or POST requests');
  assert.equal(requests.some(([,url])=>/^https?:/.test(url)&&!url.startsWith(new URL(base).origin)),false,'No third-party network calls');
- const failed=await browser.newPage();await failed.route('**/mosaic.js',r=>r.abort());await failed.goto(base);await failed.waitForFunction(()=>!document.querySelector('#error').hidden);assert.match(await failed.locator('#error').innerText(),/Could not load/);await failed.close();
+ const failed=await browser.newPage({serviceWorkers:"block"});await failed.route('**/mosaic.js',r=>r.abort());await failed.goto(base);await failed.waitForFunction(()=>!document.querySelector('#error').hidden);assert.match(await failed.locator('#error').innerText(),/Could not load/);await failed.close();
  console.log('PASS decode failure recovery, missing-module error, local-only network');
  console.log('Artifacts:',artifactDir);
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(async()=>{await browser?.close();if(server&&server.exitCode===null){server.kill();await once(server,'exit');}});
