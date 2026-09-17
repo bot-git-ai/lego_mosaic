@@ -5,8 +5,16 @@ use crate::{
     mosaic::{self, Options, Raster},
     palette,
 };
+use serde_json::{json, Value};
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+
+fn stage_bytes(raster: &mosaic::Raster, enabled: bool) -> Value {
+    if !enabled || raster.width == 0 || raster.height == 0 {
+        return Value::Null;
+    }
+    json!({ "width": raster.width, "height": raster.height, "pixels": raster.pixels })
+}
 
 pub fn start() -> Result<(), JsValue> {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().dyn_into()?;
@@ -31,7 +39,7 @@ pub fn start() -> Result<(), JsValue> {
                 .find(|p| p.0 == id)
                 .ok_or("Unknown palette")?
                 .2;
-            let result = mosaic::convert(
+            let stages = mosaic::stages(
                 &Raster {
                     width,
                     height,
@@ -40,6 +48,13 @@ pub fn start() -> Result<(), JsValue> {
                 tiles,
                 &options,
             );
+            let stage_payload = (
+                stage_bytes(&stages.fitted, options.stage_previews),
+                stage_bytes(&stages.adjusted, options.stage_previews),
+                stage_bytes(&stages.recolored, options.stage_previews),
+                stage_bytes(&stages.tiles, options.stage_previews),
+            );
+            let result = stages.mosaic;
             let colors: Vec<usize> = result
                 .palette
                 .iter()
@@ -56,6 +71,7 @@ pub fn start() -> Result<(), JsValue> {
                 result.height,
                 colors,
                 result.overflow,
+                stage_payload,
             ))
             .map_err(|e| e.to_string())
         };

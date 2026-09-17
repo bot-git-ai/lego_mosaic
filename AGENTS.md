@@ -24,7 +24,7 @@ there is no handwritten JavaScript application or raw-pointer conversion ABI.
 
 CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
 --size 64 --palette extended --preset photo --recipe o.json --save-recipe o.json
---color-limit 900 --fit stretch --pad 0 --studs --dither --force]`, PNG/SVG output, never overwrites input or existing
+--color-limit 900 --stages-dir DIR --fit stretch --pad 0 --studs --dither --force]`, PNG/SVG output, never overwrites input or existing
 outputs without `--force`. It is a thin native I/O shell: every mosaic byte
 comes from the same public library (`lego_mosaic::convert`/`render`) the
 browser uses; `tests/browser_smoke.cjs` asserts byte-identical SVG between the
@@ -42,7 +42,10 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
 
 - `mosaic.rs`: bounded RGBA Raster → fractional-area resampling with contain or
   positioned/zoomed crop or independent-axis stretch, gray padding → configurable color adjustment/remapping → perceptual
-  matching. Sharp mode preserves dark feature coverage, but the configurable
+  matching. `stages()` runs the same pipeline and returns the intermediate
+  grid-resolution images (`fitted`, `adjusted`, `recolored`, `tiles`) plus the
+  identical `Mosaic`; `convert()` delegates to it, so previews cannot drift
+  from results. Sharp mode preserves dark feature coverage, but the configurable
   `separator_guard` (0–1, default 1) can keep source-supported light gaps open
   (prevents eye patches merging with outlines; 0 = old closing behavior);
   Smooth pools linear light. Both support serpentine final-stud dithering. Conservative deterministic
@@ -59,8 +62,12 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
   never count-sorted or post-exclusion indices.
 - `cli.rs`: native argument parsing, image decode (bounded `image` crate),
   output-path collision checks and atomic-ish writes; no conversion logic.
+  `--stages-dir` writes `<stem>-{fitted,adjusted,recolored,tiles}.png`; the
+  tiles stage is byte-identical to a `.png` output of the same build.
 - `browser.rs`: wasm-only Rust web-sys DOM/events, image decode/canvas, presets,
   palette exclusions, errors, original/converted previews, exports and print.
+  Opt-in "Show processing stages" renders the four stage images via canvas;
+  the worker includes them in its reply only when enabled.
   Busy state serializes decode/build; changing settings marks old outputs stale.
 - `worker.rs`: Rust dedicated-worker protocol and conversion; transferable pixels,
   per-job termination, startup error handling, 120s timeout and cancellation.
