@@ -235,8 +235,9 @@ const WHITE: Lab = Lab {
     b: 0.0,
 };
 
-/// Intermediate pipeline images for inspection, all at the mosaic grid
-/// resolution: `fitted` (resample + padding), `adjusted` (exposure, gamma,
+/// Intermediate pipeline images at their native processing resolution.
+/// Fitted, adjusted and recolored are 4× grid width and height; tiles are
+/// at grid resolution: `fitted` (resample + padding), `adjusted` (exposure, gamma,
 /// contrast, saturation), `recolored` (HSV family remaps + neutral cleanup,
 /// shown sRGB-encoded — this is what the matcher sees in Lab) and `tiles`
 /// (each stud in its exact final tile color — the mosaic as a plain image).
@@ -258,10 +259,11 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
     let palette = excluded_palette(palette, &o.excluded);
     let labs: Vec<_> = palette.iter().map(|t| t.rgb.to_lab()).collect();
     let white = nearest(&WHITE, &labs);
+    let (stage_w, stage_h) = (o.width * OVERSAMPLE, o.height * OVERSAMPLE);
     let blank = Raster {
-        width: o.width,
-        height: o.height,
-        pixels: vec![255; o.width * o.height * 4],
+        width: stage_w,
+        height: stage_h,
+        pixels: vec![255; stage_w * stage_h * 4],
     };
     let empty_grid = vec![white; o.width * o.height];
     if !image.valid() || o.width * o.height == 0 {
@@ -269,7 +271,7 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
             fitted: blank.clone(),
             adjusted: blank.clone(),
             recolored: blank.clone(),
-            tiles: blank,
+            tiles: raster_from_tiles(&empty_grid, &palette, &o),
             mosaic: Mosaic {
                 width: o.width,
                 height: o.height,
@@ -279,8 +281,8 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
             },
         };
     }
-    let hi = resample(image, o.width * OVERSAMPLE, o.height * OVERSAMPLE, &o);
-    let fitted = raster_from_srgb(&average_studs(&hi, &o), o.width, o.height);
+    let hi = resample(image, stage_w, stage_h, &o);
+    let fitted = raster_from_srgb(&hi, stage_w, stage_h);
     let remap_target = remap_target(&o.hue_remap, &labs);
     let secondary_target = if o.secondary_remap.mode == HueMode::Auto {
         if palette.len() <= 6 {
@@ -321,8 +323,8 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
         }
         indices.push(cache[key]);
     }
-    let adjusted = raster_from_srgb(&average_studs(&adjusted_rgb, &o), o.width, o.height);
-    let recolored = raster_from_srgb(&average_studs(&recolored_rgb, &o), o.width, o.height);
+    let adjusted = raster_from_srgb(&adjusted_rgb, stage_w, stage_h);
+    let recolored = raster_from_srgb(&recolored_rgb, stage_w, stage_h);
     let mut cells = vec![WHITE; o.width * o.height];
     let mut grid = empty_grid.clone();
     let mut confidence = vec![1.0; cells.len()];
@@ -359,33 +361,6 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
             overflow,
         },
     }
-}
-
-/// Collapse the OVERSAMPLE×OVERSAMPLE samples per stud into one color so
-/// stage previews are one pixel per stud (a block mean of the encoded sRGB).
-fn average_studs(samples: &[Srgb], o: &Options) -> Vec<Srgb> {
-    let hi_w = o.width * OVERSAMPLE;
-    let n = (OVERSAMPLE * OVERSAMPLE) as f64;
-    (0..o.height)
-        .flat_map(|gy| {
-            (0..o.width).map(move |gx| {
-                let mut sum = [0.0_f64; 3];
-                for dy in 0..OVERSAMPLE {
-                    for dx in 0..OVERSAMPLE {
-                        let c = samples[(gy * OVERSAMPLE + dy) * hi_w + gx * OVERSAMPLE + dx];
-                        sum[0] += f64::from(c.r) / n;
-                        sum[1] += f64::from(c.g) / n;
-                        sum[2] += f64::from(c.b) / n;
-                    }
-                }
-                Srgb::new(
-                    byte(sum[0] / 255.0),
-                    byte(sum[1] / 255.0),
-                    byte(sum[2] / 255.0),
-                )
-            })
-        })
-        .collect()
 }
 
 /// Quantize Lab back to displayable sRGB. The pipeline itself never leaves
@@ -1235,6 +1210,29 @@ mod tests {
     }
 
     #[test]
+    fn stage_resolution_preserves_substud_samples_on_non_square_grids() {
+        let mut source = solid(32, 16, [255, 255, 255, 255]);
+        source.put(9, 5, [20, 20, 20, 255]);
+        let o = options(8, 4);
+        let result = stages(&source, MOSAIC_MAKER, &o);
+        let expected = resample(&source, 32, 16, &o);
+        assert_eq!(
+            result.fitted.pixels,
+            raster_from_srgb(&expected, 32, 16).pixels
+        );
+        for raster in [&result.fitted, &result.adjusted, &result.recolored] {
+            assert_eq!((raster.width, raster.height), (32, 16));
+            assert!(raster.valid());
+        }
+        assert_eq!((result.tiles.width, result.tiles.height), (8, 4));
+        assert!(result.tiles.valid());
+        assert_ne!(
+            &result.fitted.pixels[(5 * 32 + 9) * 4..(5 * 32 + 10) * 4],
+            &result.fitted.pixels[(5 * 32 + 8) * 4..(5 * 32 + 9) * 4]
+        );
+    }
+
+    #[test]
     fn stages_match_convert_and_show_each_transform() {
         // Pink artwork with the Auto accent remap: fitted shows the resampled
         // source, adjusted applies tone (identity at defaults), recolored
@@ -1250,11 +1248,11 @@ mod tests {
         o.hue_remap.mode = HueMode::Auto;
         let result = convert(&source, MOSAIC_MAKER, &o);
         let stages = stages(&source, MOSAIC_MAKER, &o);
-        assert_eq!(stages.fitted.width, 8);
-        assert_eq!(stages.fitted.pixels.len(), 8 * 8 * 4);
+        assert_eq!(stages.fitted.width, 32);
+        assert_eq!(stages.fitted.pixels.len(), 32 * 32 * 4);
         assert_eq!(stages.mosaic.grid, result.grid);
         // Fitted keeps the source pink.
-        let mid = (4 * 8 + 4) * 4;
+        let mid = (16 * 32 + 16) * 4;
         assert!(stages.fitted.pixels[mid] > 180 && stages.fitted.pixels[mid] < 230);
         // Adjusted (default tone options) is identical to fitted.
         assert_eq!(stages.adjusted.pixels, stages.fitted.pixels);
@@ -1273,7 +1271,7 @@ mod tests {
             pixels: Vec::new(),
         };
         let empty = crate::mosaic::stages(&blank, MOSAIC_MAKER, &o);
-        assert_eq!(empty.fitted.pixels, vec![255; 8 * 8 * 4]);
+        assert_eq!(empty.fitted.pixels, vec![255; 32 * 32 * 4]);
         assert_eq!(empty.mosaic.grid.len(), 64);
     }
 

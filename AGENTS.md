@@ -43,7 +43,7 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
 - `mosaic.rs`: bounded RGBA Raster → fractional-area resampling with contain or
   positioned/zoomed crop or independent-axis stretch, gray padding → configurable color adjustment/remapping → perceptual
   matching. `stages()` runs the same pipeline and returns the intermediate
-  grid-resolution images (`fitted`, `adjusted`, `recolored`, `tiles`) plus the
+  native-resolution images (`fitted`, `adjusted`, `recolored`: 4× grid width/height; `tiles`: grid resolution) plus the
   identical `Mosaic`; `convert()` delegates to it, so previews cannot drift
   from results. Sharp mode preserves dark feature coverage, but the configurable
   `separator_guard` (0–1, default 1) can keep source-supported light gaps open

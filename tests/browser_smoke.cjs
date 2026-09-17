@@ -120,6 +120,14 @@ let browser;
   for(const id of ['stage-fitted','stage-adjusted','stage-recolored','stage-tiles'])
    assert.ok(await page.locator('#'+id).isVisible(),id+' visible');
   assert.match(await page.locator('#stages-card').innerText(),/Processing stages/);
+  const gw=Number(await page.locator('#width').inputValue()),gh=Number(await page.locator('#height').inputValue());
+  for(const name of ['fitted','adjusted','recolored','tiles']){
+   const factor=name==='tiles'?1:4;
+   await page.locator('#stage-'+name).evaluate(i=>i.decode());
+   assert.deepEqual(await page.locator('#stage-'+name).evaluate(i=>[i.naturalWidth,i.naturalHeight]),[gw*factor,gh*factor]);
+   assert.match(await page.locator('#stage-'+name+'-size').innerText(),new RegExp(`${gw*factor} × ${gh*factor} px`));
+  }
+
   await page.locator('#stage_previews').evaluate(el=>{el.checked=false;el.dispatchEvent(new Event('change',{bubbles:true}));});await build();
   assert.ok(await page.locator('#stages-card').isHidden(),'stages hidden when off');
   await page.click('#reset');
