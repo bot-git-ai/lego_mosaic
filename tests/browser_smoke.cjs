@@ -134,6 +134,66 @@ let browser;
   console.log('PASS processing stages on and off');
  }
  // Failure recovery must preserve the previous result and allow another build.
+ // Interactive crop frame: overlay follows "Fill frame", stays in sync with
+ // the position/zoom sliders, and its frame converts byte-identically to CLI.
+ if(process.argv[2]){
+  await page.setViewportSize({width:1280,height:720});
+  await page.click('#reset');await ready();
+  // The crop block needs a real photo-sized image; earlier sections leave a
+  // tiny synthetic canvas loaded, and a fresh file re-anchors everything.
+  await page.locator('#image').setInputFiles(path.resolve(process.argv[2]));await ready();
+  await set('fit','crop');
+  await page.waitForFunction(()=>!document.querySelector('#crop-overlay').hidden);
+  await page.locator('#crop-handle-se').scrollIntoViewIfNeeded();
+  const frameBox=()=>page.locator('#crop-frame').evaluate(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};});
+  const before=await frameBox();
+  assert.ok(before.w>10&&before.h>10,'default frame is visible');
+  // Corner drag shrinks the frame around the pinned opposite corner.
+  const start=await page.locator('#crop-handle-se').evaluate(el=>{const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};});
+  await page.mouse.move(start.x,start.y);await page.mouse.down();
+  await page.mouse.move(start.x-Math.round(before.w*0.25),start.y-Math.round(before.h*0.25),{steps:4});await page.mouse.up();
+  const afterDrag=await frameBox();
+  assert.ok(afterDrag.w<before.w-10&&afterDrag.h<before.h-10,'corner drag shrinks frame');
+  assert.ok(afterDrag.x>=before.x-1&&afterDrag.y>=before.y-1,'frame stays inside the picture');
+  // Zoom slider reshapes the drawn frame (shared source of truth).
+  await set('crop_zoom',2);const zoomed=await frameBox();
+  assert.ok(zoomed.w<afterDrag.w-1&&zoomed.h<afterDrag.h-1,'zoom slider redraws frame');
+  // Position sliders pan the drawn frame toward the top-left corner.
+  // Anchor from a centered frame: the drag above pins the frame at (0,0),
+  // where panning left/up is already at its clamp.
+  await set('crop_x',0.5);await set('crop_y',0.5);const centered=await frameBox();
+  await set('crop_x',0);await set('crop_y',0);const panned=await frameBox();
+  assert.ok(panned.x<centered.x-1&&panned.y<centered.y-1,'x/y sliders redraw frame');
+  // Slider state round-trips through Build into the byte-identical CLI SVG.
+  // The CLI has no crop flags, so the sliders' values ride in via a recipe.
+  await build();const flatCrop=await svg();
+  const cropRecipe=path.join(artifactDir,'crop.json');
+  execFileSync(path.join(dir,'target/release/lego-mosaic'),['convert',path.resolve(process.argv[2]),'--output',path.join(artifactDir,'crop-seed.svg'),'--save-recipe',cropRecipe],{stdio:['ignore','pipe','pipe']});
+  const cropOptions=JSON.parse(await fs.readFile(cropRecipe,'utf8'));
+  Object.assign(cropOptions,{fit:'crop',zoom:2,crop_x:0,crop_y:0});
+  await fs.writeFile(cropRecipe,JSON.stringify(cropOptions));
+  execFileSync(path.join(dir,'target/release/lego-mosaic'),['convert',path.resolve(process.argv[2]),'--output',path.join(artifactDir,'crop-cli.svg'),'--recipe',cropRecipe,'--save-recipe',path.join(artifactDir,'crop-saved.json')],{stdio:['ignore','pipe','pipe']});
+  assert.equal(await fs.readFile(path.join(artifactDir,'crop-cli.svg'),'utf8'),flatCrop,'CLI and browser must agree on the same crop');
+  const recipe=JSON.parse(await fs.readFile(path.join(artifactDir,'crop-saved.json'),'utf8'));
+  assert.equal(recipe.fit,'crop');assert.equal(recipe.zoom,2);assert.equal(recipe.crop_x,0);assert.equal(recipe.crop_y,0);
+  // Wheel zoom over the overlay works without scrolling the well; start
+  // from a known mid-zoom frame so the direction has room to shrink.
+  await set('crop_zoom',1.4);await set('crop_x',0.5);await set('crop_y',0.5);
+  const baseFrame=await frameBox();
+  const wellScroll=await page.locator('.image-well').first().evaluate(el=>el.scrollTop);
+  await page.locator('#crop-overlay').hover();
+  await page.mouse.wheel(0,-240);
+  const wheelZoom=await frameBox();
+  assert.ok(wheelZoom.w<baseFrame.w-1,'wheel zooms the frame');
+  assert.ok(Math.abs(wheelZoom.x-baseFrame.x)>0.5,'wheel zoom keeps the pointer anchor');
+  assert.equal(await page.locator('.image-well').first().evaluate(el=>el.scrollTop),wellScroll,'wheel must not scroll');
+  // Switching back to contain hides the overlay.
+  await set('fit','contain');
+  await page.waitForFunction(()=>document.querySelector('#crop-overlay').hidden);
+  await page.click('#reset');
+  console.log('PASS interactive crop frame: drag, slider sync, CLI parity, wheel zoom, fit toggle');
+ }
+ // Failure recovery must preserve the previous result and allow another build.
  await page.locator('#image').setInputFiles({name:'broken.png',mimeType:'image/png',buffer:Buffer.from('not an image')});await ready();assert.equal(await page.locator('#error').isVisible(),true);await build();
  assert.equal(errors.length,0,errors.join('\n'));
  assert.equal(requests.some(([method])=>method!=='GET'),false,'No uploads or POST requests');
