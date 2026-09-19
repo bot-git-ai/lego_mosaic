@@ -31,7 +31,7 @@ web-sys = { version = "0.3.105", features = [
   "Navigator", "ServiceWorkerContainer", "ServiceWorkerRegistration", "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "DedicatedWorkerGlobalScope", "Window", "Document", "Element", "Node", "NodeList", "EventTarget", "Event", "MouseEvent",
   "HtmlElement", "HtmlInputElement", "HtmlSelectElement", "HtmlButtonElement", "HtmlAnchorElement",
   "HtmlImageElement", "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "ImageBitmap",
-  "File", "FileList", "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "DomTokenList",
+  "File", "FileList", "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "DomTokenList", "PointerEvent", "WheelEvent", "KeyboardEvent", "DomRect", "DomRectReadOnly",
   "CssStyleDeclaration", "HtmlCollection", "HtmlFieldSetElement", "Performance", "console"
 ] }
 

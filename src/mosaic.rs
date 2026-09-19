@@ -491,7 +491,7 @@ fn excluded_palette(palette: &[TileColor], excluded: &[usize]) -> Vec<TileColor>
 
 /// Source-coordinate viewport. Both modes keep square source pixels;
 /// contain returns a larger virtual canvas, with its outside area white.
-fn viewport(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> (f64, f64, f64, f64) {
+pub(crate) fn viewport(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> (f64, f64, f64, f64) {
     let sw = image.width as f64;
     let sh = image.height as f64;
     let sx = sw / out_w as f64;
@@ -513,6 +513,66 @@ fn viewport(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> (f64, f6
         )
     };
     (x, y, scale, scale)
+}
+
+/// The crop frame: the exact source rectangle a "Fill frame" conversion of
+/// these options samples — `viewport` in the Crop interpretation, whatever
+/// `fit` currently says. This is the inverse data the browser needs to draw
+/// a draggable frame over the original image; the window position is the
+/// clamped, effective one (a crop_x past the edge reports the edge).
+pub fn crop_frame(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> (f64, f64, f64, f64) {
+    let sw = image.width as f64;
+    let sh = image.height as f64;
+    let sx = sw / out_w as f64;
+    let sy = sh / out_h as f64;
+    let scale = sx.min(sy) / o.zoom;
+    let (vw, vh) = (out_w as f64 * scale, out_h as f64 * scale);
+    let x = (o.crop_x * sw - vw * 0.5).clamp(0.0, (sw - vw).max(0.0));
+    let y = (o.crop_y * sh - vh * 0.5).clamp(0.0, (sh - vh).max(0.0));
+    (x, y, vw, vh)
+}
+
+/// Map a manual crop frame (source-pixel rectangle from the interactive UI)
+/// back onto `Options`. The frame's center becomes the new `crop_x`/`crop_y`;
+/// its width sets the zoom. Aspect is inherited from the current options'
+/// grid, so a frame resized to the grid proportions always round-trips.
+/// A frame that merely moves the default view returns a zoom of 1.0 rather
+/// than 0.999… so the zoom readout stays clean.
+pub fn crop_frame_options(
+    image: &Raster,
+    out_w: usize,
+    out_h: usize,
+    o: &Options,
+    frame: (f64, f64, f64, f64),
+) -> Options {
+    let (fx, fy, fw, fh) = frame;
+    let sw = image.width as f64;
+    let sh = image.height as f64;
+    let mut next = o.clone();
+    next.fit = FitMode::Crop;
+    // Cover scale for this grid, matching viewport(): scale = base / zoom,
+    // so frame width out_w·base/zoom inverts to zoom = out_w·base / fw.
+    let base = (sw / out_w as f64).min(sh / out_h as f64);
+    next.zoom = (out_w as f64 * base / fw)
+        .max(out_h as f64 * base / fh)
+        .max(1.0);
+    if !next.zoom.is_finite() {
+        next.zoom = 1.0;
+    }
+    // Snap to 1.0 when the frame still covers the whole image, so the
+    // default centered view never reports a fractional zoom.
+    if (out_w as f64 * base / next.zoom - sw).abs() <= f64::EPSILON * sw {
+        next.zoom = 1.0;
+    }
+    // Center of the requested frame, expressed in full-source fractions —
+    // exactly the semantic crop_x/crop_y already use. NaN/degenerate frames
+    // fall back to the center; out-of-range centers clamp to the edges (the
+    // realized window is re-clamped by viewport() either way).
+    let cx = fx + fw * 0.5;
+    let cy = fy + fh * 0.5;
+    next.crop_x = if cx.is_finite() { (cx / sw).clamp(0.0, 1.0) } else { 0.5 };
+    next.crop_y = if cy.is_finite() { (cy / sh).clamp(0.0, 1.0) } else { 0.5 };
+    next
 }
 
 fn linear(v: f64) -> f64 {
@@ -1131,6 +1191,121 @@ mod tests {
                 rgb: Srgb::new(247, 209, 23),
             },
         ]
+    }
+
+    /// Cover viewport with default centered crop options.
+    fn cover_frame(w: usize, h: usize, gw: usize, gh: usize) -> (f64, f64, f64, f64) {
+        let image = solid(w, h, [255, 0, 0, 255]);
+        crop_frame(&image, gw, gh, &Options::default())
+    }
+
+    #[test]
+    fn crop_frame_matches_viewport_for_default_centered_crop() {
+        // Cover at zoom 1: frame spans the full short axis, centered on the
+        // long axis — exactly what resampling will sample.
+        let (w, h) = (400usize, 200usize);
+        let (x, y, fw, fh) = cover_frame(w, h, 48, 48);
+        assert!((fw - 200.0).abs() < 1e-9, "{fw}");
+        assert!((fh - 200.0).abs() < 1e-9);
+        assert!((y - 0.0).abs() < 1e-9);
+        assert!((x - 100.0).abs() < 1e-9);
+        // And the forward direction from those options reproduces it.
+        let o = Options {
+            fit: FitMode::Crop,
+            crop_x: 0.5,
+            crop_y: 0.5,
+            zoom: 1.0,
+            ..Options::default()
+        };
+        let image = solid(w, h, [255, 0, 0, 255]);
+        let (vx, vy, vw, vh) = crop_frame(&image, 48, 48, &o);
+        assert!((vx - 100.0).abs() < 1e-9 && (vy - 0.0).abs() < 1e-9);
+        assert!((vw - 200.0).abs() < 1e-9 && (vh - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn crop_frame_options_round_trip_viewport() {
+        let image = solid(400, 200, [255, 0, 0, 255]);
+        let o = Options {
+            fit: FitMode::Crop,
+            crop_x: 0.75,
+            crop_y: 0.25,
+            zoom: 2.0,
+            ..Options::default()
+        };
+        let frame = crop_frame(&image, 48, 48, &o);
+        let back = crop_frame_options(&image, 48, 48, &Options::default(), frame);
+        assert!((back.crop_x - o.crop_x).abs() < 1e-9, "{:?}", back);
+        assert!((back.crop_y - o.crop_y).abs() < 1e-9);
+        assert!((back.zoom - o.zoom).abs() < 1e-9, "{:?}", back);
+        assert_eq!(back.fit, FitMode::Crop);
+        // Same round trip at an off-center pan (still realizable: the
+        // un-clamped window fits inside the image at this zoom).
+        let o2 = Options {
+            fit: FitMode::Crop,
+            crop_x: 0.7,
+            crop_y: 0.3,
+            zoom: 2.0,
+            ..Options::default()
+        };
+        let frame2 = crop_frame(&image, 48, 48, &o2);
+        let back2 = crop_frame_options(&image, 48, 48, &Options::default(), frame2);
+        assert!((back2.crop_x - o2.crop_x).abs() < 1e-9, "{:?}", back2);
+        assert!((back2.crop_y - o2.crop_y).abs() < 1e-9);
+        assert!((back2.zoom - o2.zoom).abs() < 1e-9);
+    }
+
+    #[test]
+    fn crop_frame_options_fixed_point_when_clamped() {
+        // A frame drawn hard into a corner is the clamped, effective window.
+        // Mapping it back cannot reproduce the *requested* pan fractions, but
+        // re-deriving the frame must return exactly the same rectangle: what
+        // you frame is what the mosaic samples.
+        let image = solid(400, 200, [255, 0, 0, 255]);
+        let o = Options {
+            fit: FitMode::Crop,
+            crop_x: 1.0,
+            crop_y: 0.0,
+            zoom: 3.5,
+            ..Options::default()
+        };
+        let frame = crop_frame(&image, 48, 48, &o);
+        let back = crop_frame_options(&image, 48, 48, &Options::default(), frame);
+        assert_eq!(crop_frame(&image, 48, 48, &back), frame);
+        assert!((0.0..=1.0).contains(&back.crop_x));
+        assert!((0.0..=1.0).contains(&back.crop_y));
+    }
+
+    #[test]
+    fn crop_frame_options_snaps_full_frame_to_zoom_one() {
+        // A frame equal to the whole (non-square) image is exactly the
+        // default cover view: zoom must report 1.0, centered fractions.
+        let image = solid(400, 200, [255, 0, 0, 255]);
+        let back = crop_frame_options(&image, 48, 48, &Options::default(), (0.0, 0.0, 400.0, 200.0));
+        assert_eq!(back.zoom, 1.0);
+        assert!((back.crop_x - 0.5).abs() < 1e-9);
+        assert!((back.crop_y - 0.5).abs() < 1e-9);
+        // Realized viewport from the mapped options must sample everything.
+        let v = crop_frame(&image, 48, 48, &back);
+        assert!((v.0 - 100.0).abs() < 1e-9 && (v.1 - 0.0).abs() < 1e-9);
+        assert!((v.2 - 200.0).abs() < 1e-9 && (v.3 - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn crop_frame_options_are_sanitized_for_conversion() {
+        // A degenerate/oversized frame must still produce convertible options.
+        let image = solid(400, 200, [255, 0, 0, 255]);
+        for frame in [
+            (0.0, 0.0, 0.0, 0.0),
+            (f64::NAN, 12.0, 100.0, 50.0),
+            (-50.0, -50.0, 900.0, 900.0),
+        ] {
+            let next = crop_frame_options(&image, 48, 48, &Options::default(), frame);
+            assert!(next.zoom.is_finite() && next.zoom >= 1.0 && next.zoom <= 8.0);
+            assert!((0.0..=1.0).contains(&next.crop_x));
+            assert!((0.0..=1.0).contains(&next.crop_y));
+            assert_eq!(next.fit, FitMode::Crop);
+        }
     }
 
     #[test]

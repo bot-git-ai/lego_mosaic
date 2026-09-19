@@ -14,10 +14,11 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     Blob, BlobPropertyBag, CanvasRenderingContext2d, Document, Element, Event, File,
     HtmlAnchorElement, HtmlCanvasElement, HtmlElement, HtmlFieldSetElement, HtmlImageElement,
-    HtmlInputElement, HtmlSelectElement, ImageBitmap, ImageData, Url,
+    HtmlInputElement, HtmlSelectElement, ImageBitmap, ImageData, KeyboardEvent, PointerEvent, Url,
+    WheelEvent,
 };
 
-use crate::mosaic::{FitMode, HueMode, Mosaic, Options, Order, Raster};
+use crate::mosaic::{crop_frame, crop_frame_options, FitMode, HueMode, Mosaic, Options, Order, Raster};
 use crate::{palette, render};
 
 type Shared = Rc<RefCell<App>>;
@@ -64,6 +65,37 @@ struct App {
     timeout: Option<i32>,
     timer_callback: Option<Closure<dyn FnMut()>>,
     elapsed: f64,
+    /// Interactive crop: overlay geometry, in-flight pointer drag, and
+    /// whether the frame mirrors the current "Fill frame" options.
+    crop: CropUi,
+}
+
+/// Everything the interactive crop frame needs between events.
+#[derive(Default)]
+struct CropUi {
+    /// Source-rect frame of the options currently drawn on screen.
+    drawn: Option<CropFrame>,
+    /// Pointer drag in flight: which handle, offset from its origin.
+    drag: Option<CropDrag>,
+}
+
+#[derive(Clone, Copy)]
+struct CropFrame {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+#[derive(Clone, Copy)]
+struct CropDrag {
+    /// Corner being resized, or None for a whole-frame pan.
+    corner: Option<CropHandle>,
+    /// Pointer offset from the grabbed corner / frame origin, source px.
+    grab_x: f64,
+    grab_y: f64,
+    /// Frame at gesture start, for clamping and corner anchoring.
+    origin: CropFrame,
 }
 
 fn document() -> Result<Document, JsValue> {
@@ -159,7 +191,7 @@ fn set_busy(state: &Shared, busy: bool, message: &str) -> Result<(), JsValue> {
     text("status", message)?;
     element("status")?.set_class_name("status");
     element("preview")?.set_attribute("aria-busy", if busy { "true" } else { "false" })?;
-    Ok(())
+    update_labels_with(busy)
 }
 
 fn mark_pending(state: &Shared) -> Result<(), JsValue> {
@@ -222,6 +254,10 @@ fn swatches(state: &Shared) -> Result<(), JsValue> {
 }
 
 fn update_labels() -> Result<(), JsValue> {
+    update_labels_with(false)
+}
+
+fn update_labels_with(state_busy: bool) -> Result<(), JsValue> {
     text("pad-v", &format!("{:.0}", number("pad")?))?;
     text(
         "separator_guard-v",
@@ -274,6 +310,8 @@ fn update_labels() -> Result<(), JsValue> {
     input("dither_strength")?.set_disabled(!input("dither")?.checked());
     input("despeckle")?.set_disabled(input("dither")?.checked());
     input("secondary_target")?.set_disabled(select("secondary_mode")?.value() != "target");
+    // Fitting lives in the preview footer next to the crop frame.
+    select("fit")?.set_disabled(state_busy);
     Ok(())
 }
 
@@ -381,7 +419,8 @@ fn apply_preset(state: &Shared, preset: &str, reset: bool) -> Result<(), JsValue
     text("preset-note", note)?;
     swatches(state)?;
     update_labels()?;
-    mark_pending(state)
+    mark_pending(state)?;
+    refresh_crop_overlay(state)
 }
 
 fn read_options(state: &Shared) -> Result<(String, Options), JsValue> {
@@ -569,6 +608,15 @@ fn choose_file(state: &Shared, file: File) -> Result<(), JsValue> {
                 .set_src(&url);
             hidden("original", false)?;
             hidden("original-empty", true)?;
+            {
+                let app = Rc::clone(&state);
+                let once = Closure::<dyn FnMut()>::new(move || {
+                    let _ = refresh_crop_overlay(&app);
+                });
+                let image = element("original")?.dyn_into::<HtmlImageElement>()?;
+                image.set_onload(Some(once.as_ref().unchecked_ref()));
+                once.forget();
+            }
             text(
                 "filename",
                 &format!(
@@ -993,12 +1041,515 @@ fn apply_zoom() -> Result<(), JsValue> {
     text("zoom-v", &format!("{zoom:.0}%"))
 }
 
+/// Frame rect of the sliders' current options, for the given raster.
+/// Errors (e.g. a half-typed width field) leave the drawn frame untouched —
+/// typing must never pop error boxes.
+fn options_frame(state: &Shared, raster: &Raster) -> Result<Option<CropFrame>, JsValue> {
+    match read_options(state) {
+        Ok((_, options)) => {
+            let (x, y, w, h) = crop_frame(raster, options.width, options.height, &options);
+            Ok(Some(CropFrame { x, y, w, h }))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Redraw the overlay from the current state. Called after decode, preset
+/// changes, slider input, builds and layout-affecting resizes.
+fn refresh_crop_overlay(state: &Shared) -> Result<(), JsValue> {
+    let raster = state.borrow().raster.clone();
+    let Some(raster) = raster else {
+        state.borrow_mut().crop.drawn = None;
+        hidden("crop-note", true)?;
+        hidden("crop-wrap", true)?;
+        return Ok(());
+    };
+    // The wrap carries the picture itself: size it on every refresh,
+    // whatever the fitting mode is, so the image always fits the well.
+    crop_layout(&raster)?;
+    hidden("crop-wrap", false)?;
+    let cropping = select("fit")?.value() == "crop";
+    hidden("crop-note", !cropping)?;
+    hidden("crop-overlay", !cropping)?;
+    // Recompute from the controls unless a pointer gesture owns the frame.
+    if cropping && state.borrow().crop.drag.is_none() {
+        if let Some(frame) = options_frame(state, &raster)? {
+            draw_crop_frame(state, &raster, &frame)?;
+        }
+    }
+    Ok(())
+}
+
+/// Paint one frame: overlay box, dimmed outside, corner handles. All
+/// coordinates are wrap-relative; the wrap tracks the picture exactly.
+fn draw_crop_frame(state: &Shared, raster: &Raster, frame: &CropFrame) -> Result<(), JsValue> {
+    let layout = crop_layout(raster)?;
+    let css = layout.to_css(frame);
+    hidden("crop-overlay", false)?;
+    let frame_el: HtmlElement = element("crop-frame")?.dyn_into()?;
+    let style = frame_el.style();
+    style.set_property("left", &format!("{:.2}px", css.x))?;
+    style.set_property("top", &format!("{:.2}px", css.y))?;
+    style.set_property("width", &format!("{:.2}px", css.w))?;
+    style.set_property("height", &format!("{:.2}px", css.h))?;
+    for (name, hx, hy) in [
+        ("nw", css.x, css.y),
+        ("ne", css.x + css.w, css.y),
+        ("sw", css.x, css.y + css.h),
+        ("se", css.x + css.w, css.y + css.h),
+    ] {
+        let handle: HtmlElement = element(&format!("crop-handle-{name}"))?.dyn_into()?;
+        let style = handle.style();
+        style.set_property("left", &format!("{:.2}px", hx))?;
+        style.set_property("top", &format!("{:.2}px", hy))?;
+    }
+    state.borrow_mut().crop.drawn = Some(*frame);
+    Ok(())
+}
+
+/// Commit a frame: write sliders, keep the picture untouched, mark outputs
+/// stale. The frame is already grid-aspect in source pixels. Slider reads
+/// can fail on a half-typed number field; gestures then do nothing rather
+/// than spamming errors.
+fn apply_crop_frame(state: &Shared, raster: &Raster, frame: &CropFrame) -> Result<(), JsValue> {
+    let Ok((_, options)) = read_options(state) else {
+        return Ok(());
+    };
+    let next = crop_frame_options(
+        raster,
+        options.width,
+        options.height,
+        &options,
+        (frame.x, frame.y, frame.w, frame.h),
+    );
+    input("crop_x")?.set_value(&next.crop_x.to_string());
+    input("crop_y")?.set_value(&next.crop_y.to_string());
+    input("crop_zoom")?.set_value(&next.zoom.to_string());
+    update_labels()?;
+    mark_pending(state)
+}
+
+/// Start a gesture on the overlay or a corner handle: remember what was
+/// grabbed (corner resize, or whole-frame pan) and where the pointer began.
+fn crop_gesture_start(state: &Shared, event: &Event) -> Result<(), JsValue> {
+    if state.borrow().busy {
+        return Ok(());
+    }
+    let raster = state
+        .borrow()
+        .raster
+        .clone()
+        .ok_or_else(|| JsValue::from_str("Choose an image first"))?;
+    // Handles sit inside the overlay, so gestures bubble up to it: without
+    // this gate one press would start two gestures.
+    if state.borrow().crop.drag.is_some() {
+        return Ok(());
+    }
+    let target: HtmlElement = match event.target() {
+        Some(t) => t.dyn_into()?,
+        None => return Ok(()),
+    };
+    let corner = match target.get_attribute("data-handle") {
+        Some(name) => match CropHandle::of(&name) {
+            Some(c) => Some(c),
+            None => return Ok(()),
+        },
+        // Pan only when the overlay itself was grabbed, not its handles.
+        None if target.get_attribute("id").as_deref() == Some("crop-overlay") => None,
+        _ => return Ok(()),
+    };
+    event.prevent_default();
+    let pointer = event
+        .dyn_ref::<PointerEvent>()
+        .ok_or_else(|| JsValue::from_str("Pointer event expected"))?;
+    let layout = crop_layout(&raster)?;
+    let rect = wrap_rect()?;
+    let frame = state
+        .borrow()
+        .crop
+        .drawn
+        .ok_or_else(|| JsValue::from_str("Crop frame is not ready"))?;
+    let (px, py) = layout.clamped_source(&rect, pointer.client_x().into(), pointer.client_y().into());
+    // Corners: store the offset from the grabbed corner. Pans: the grab
+    // point inside the frame; movement shifts the frame by the same delta.
+    let (grab_x, grab_y) = match corner {
+        Some(c) => {
+            let (cx, cy) = corner_point(&frame, c);
+            (px - cx, py - cy)
+        }
+        None => (px - frame.x, py - frame.y),
+    };
+    state.borrow_mut().crop.drag = Some(CropDrag {
+        corner,
+        grab_x,
+        grab_y,
+        origin: frame,
+    });
+    let _ = target.set_pointer_capture(pointer.pointer_id());
+    Ok(())
+}
+
+/// Pointer move with an active gesture: resize from the corner or pan the
+/// whole frame, then commit and repaint.
+fn crop_gesture_move(state: &Shared, event: &Event) -> Result<(), JsValue> {
+    let Some(drag) = state.borrow().crop.drag else {
+        return Ok(());
+    };
+    if state.borrow().busy {
+        state.borrow_mut().crop.drag = None;
+        return Ok(());
+    }
+    let target: HtmlElement = match event.target() {
+        Some(t) => t.dyn_into()?,
+        None => return Ok(()),
+    };
+    // Only the captured element drives its gesture (handles resize, the
+    // overlay pans); ignore any other target that happens to bubble.
+    let wanted = match drag.corner {
+        Some(_) => target.get_attribute("data-handle").is_some(),
+        None => target.get_attribute("id").as_deref() == Some("crop-overlay"),
+    };
+    if !wanted {
+        return Ok(());
+    }
+    event.prevent_default();
+    let raster = state
+        .borrow()
+        .raster
+        .clone()
+        .ok_or_else(|| JsValue::from_str("Choose an image first"))?;
+    let pointer = event
+        .dyn_ref::<PointerEvent>()
+        .ok_or_else(|| JsValue::from_str("Pointer event expected"))?;
+    let layout = crop_layout(&raster)?;
+    let rect = wrap_rect()?;
+    let (px, py) = layout.clamped_source(&rect, pointer.client_x().into(), pointer.client_y().into());
+    let frame = match drag.corner {
+        // The grabbed corner follows the pointer minus the grab offset.
+        Some(corner) => {
+            anchored_frame(&drag.origin, corner, px - drag.grab_x, py - drag.grab_y, &raster)
+        }
+        None => {
+            let start = drag.origin;
+            let x = (px - drag.grab_x).clamp(0.0, (raster.width as f64 - start.w).max(0.0));
+            let y = (py - drag.grab_y).clamp(0.0, (raster.height as f64 - start.h).max(0.0));
+            CropFrame { x, y, ..start }
+        }
+    };
+    apply_crop_frame(state, &raster, &frame)?;
+    draw_crop_frame(state, &raster, &frame)
+}
+
+/// Gesture finished: drop the drag state and release pointer capture.
+fn crop_gesture_end(state: &Shared, event: &Event) -> Result<(), JsValue> {
+    if state.borrow().crop.drag.is_none() {
+        return Ok(());
+    }
+    event.prevent_default();
+    state.borrow_mut().crop.drag = None;
+    if let Some(target) = event.target().and_then(|t| t.dyn_into::<HtmlElement>().ok()) {
+        if let Some(pointer) = event.dyn_ref::<PointerEvent>() {
+            let _ = target.release_pointer_capture(pointer.pointer_id());
+        }
+    }
+    Ok(())
+}
+
+/// Zoom by wheel over the overlay: shrink/grow the frame around the pointer.
+fn crop_wheel(state: &Shared, event: &Event) -> Result<(), JsValue> {
+    let Some(target) = event.target() else {
+        return Ok(());
+    };
+    let overlay: HtmlElement = target.dyn_into()?;
+    if overlay.get_attribute("id").as_deref() != Some("crop-overlay") {
+        return Ok(());
+    }
+    event.prevent_default();
+    let raster = state
+        .borrow()
+        .raster
+        .clone()
+        .ok_or_else(|| JsValue::from_str("Choose an image first"))?;
+    let wheel = event
+        .dyn_ref::<WheelEvent>()
+        .ok_or_else(|| JsValue::from_str("Wheel event expected"))?;
+    let layout = crop_layout(&raster)?;
+    let current = state
+        .borrow()
+        .crop
+        .drawn
+        .ok_or_else(|| JsValue::from_str("Crop frame is not ready"))?;
+    let factor = if wheel.delta_y() > 0.0 { 1.1 } else { 1.0 / 1.1 };
+    // Keep the point under the wheel visually fixed while resizing: with
+    // f = (pointer - frame) clamped into the frame, new x = f - f·(w'/w).
+    let rect = wrap_rect()?;
+    let (px, py) = layout.to_source(&rect, wheel.client_x().into(), wheel.client_y().into());
+    let focus_x = (px - current.x).clamp(0.0, current.w);
+    let focus_y = (py - current.y).clamp(0.0, current.h);
+    let aspect = current.w / current.h;
+    // Grow/shrink on the dominant axis, then re-derive the pair for grid
+    // aspect, clamped to the image bounds on both axes.
+    let mut w = current.w * factor;
+    let max_w = raster.width as f64;
+    let max_h = raster.height as f64;
+    let min_side = cell_size(&raster);
+    w = w.clamp(min_side, max_w);
+    let mut h = (w / aspect).clamp(min_side, max_h);
+    if h * aspect > max_w {
+        w = max_h * aspect;
+        if w > max_w {
+            w = max_w;
+        }
+        h = w / aspect;
+    }
+    w = (h * aspect).min(max_w);
+    let x = (current.x + focus_x * (1.0 - w / current.w)).clamp(0.0, (max_w - w).max(0.0));
+    let y = (current.y + focus_y * (1.0 - h / current.h)).clamp(0.0, (max_h - h).max(0.0));
+    let frame = CropFrame { x, y, w, h };
+    apply_crop_frame(state, &raster, &frame)?;
+    draw_crop_frame(state, &raster, &frame)
+}
+
+/// Arrow-key nudge of a focused corner handle, one source pixel per press
+/// (ten with Shift). Keeps grid aspect like dragging.
+fn crop_handle_key(state: &Shared, handle_name: &str, event: &Event) -> Result<(), JsValue> {
+    let Some(handle) = CropHandle::of(handle_name) else {
+        return Ok(());
+    };
+    let key_event = event
+        .dyn_ref::<KeyboardEvent>()
+        .ok_or_else(|| JsValue::from_str("Keyboard event expected"))?;
+    let Some((dx, dy)) = handle.moved(&key_event.key()) else {
+        return Ok(());
+    };
+    event.prevent_default();
+    let raster = state
+        .borrow()
+        .raster
+        .clone()
+        .ok_or_else(|| JsValue::from_str("Choose an image first"))?;
+    let frame = state
+        .borrow()
+        .crop
+        .drawn
+        .ok_or_else(|| JsValue::from_str("Crop frame is not ready"))?;
+    let step = if key_event.shift_key() { 10.0 } else { 1.0 };
+    let (corner_x, corner_y) = match handle {
+        CropHandle::Nw => (frame.x + dx * step, frame.y + dy * step),
+        CropHandle::Ne => (frame.x + frame.w + dx * step, frame.y + dy * step),
+        CropHandle::Sw => (frame.x + dx * step, frame.y + frame.h + dy * step),
+        CropHandle::Se => (frame.x + frame.w + dx * step, frame.y + frame.h + dy * step),
+    };
+    let next = anchored_frame(&frame, handle, corner_x, corner_y, &raster);
+    apply_crop_frame(state, &raster, &next)?;
+    draw_crop_frame(state, &raster, &next)
+}
+
+/// Smallest sensible crop side: one grid cell in source pixels.
+fn cell_size(raster: &Raster) -> f64 {
+    let cols = raster.width as f64 / 16.0;
+    let rows = raster.height as f64 / 16.0;
+    let cells = cols.max(rows).ceil().max(1.0);
+    (raster.width as f64 / cells).max(raster.height as f64 / cells).max(1.0)
+}
+
+/// Frame after moving `handle`'s corner to a point: opposite corner pinned,
+/// grid aspect preserved, kept inside the image with a one-cell minimum.
+fn anchored_frame(
+    origin: &CropFrame,
+    handle: CropHandle,
+    corner_x: f64,
+    corner_y: f64,
+    raster: &Raster,
+) -> CropFrame {
+    let aspect = origin.w / origin.h;
+    // Keep at least one grid cell: useful on small images, where a fixed
+    // source-pixel floor could swallow the whole frame.
+    let min_side = cell_size(raster);
+    // Desired half-extents from the pinned corner.
+    let (px, py) = match handle {
+        CropHandle::Nw => (origin.x + origin.w, origin.y + origin.h),
+        CropHandle::Ne => (origin.x, origin.y + origin.h),
+        CropHandle::Sw => (origin.x + origin.w, origin.y),
+        CropHandle::Se => (origin.x, origin.y),
+    };
+    let dx = (corner_x - px) * match handle {
+        CropHandle::Nw | CropHandle::Sw => 1.0,
+        _ => -1.0,
+    };
+    let dy = (corner_y - py) * match handle {
+        CropHandle::Nw | CropHandle::Ne => 1.0,
+        _ => -1.0,
+    };
+    // Choose the extent: the dominant axis keeps grid aspect.
+    let mut w = dx.abs().max(dy.abs() * aspect);
+    w = w.clamp(min_side, raster.width as f64);
+    let mut h = w / aspect;
+    if h > raster.height as f64 {
+        h = raster.height as f64;
+        w = (h * aspect).min(raster.width as f64);
+    }
+    // The opposite corner stays pinned: it is the fixed corner of the new
+    // frame (Se pins under an Nw drag, Sw under Ne, etc.).
+    let (x, y) = match handle {
+        CropHandle::Nw => (px - w, py - h),
+        CropHandle::Ne => (px, py - h),
+        CropHandle::Sw => (px - w, py),
+        CropHandle::Se => (px, py),
+    };
+    CropFrame {
+        x: x.clamp(0.0, (raster.width as f64 - w).max(0.0)),
+        y: y.clamp(0.0, (raster.height as f64 - h).max(0.0)),
+        w,
+        h,
+    }
+}
+
+/// Wire all interactive-crop listeners. Fixed closures, like the rest of start().
+fn listen_crop(state: &Shared) -> Result<(), JsValue> {
+    for name in ["nw", "ne", "sw", "se"] {
+        let app = Rc::clone(state);
+        let handle = name.to_string();
+        listen(&format!("crop-handle-{handle}"), "pointerdown", move |e| crop_gesture_start(&app, &e))?;
+        let app = Rc::clone(state);
+        let handle = name.to_string();
+        listen(&format!("crop-handle-{handle}"), "pointermove", move |e| crop_gesture_move(&app, &e))?;
+        let app = Rc::clone(state);
+        let handle = name.to_string();
+        listen(&format!("crop-handle-{handle}"), "pointerup", move |e| crop_gesture_end(&app, &e))?;
+        let app = Rc::clone(state);
+        let handle = name.to_string();
+        listen(&format!("crop-handle-{handle}"), "keydown", move |e| crop_handle_key(&app, &handle, &e))?;
+    }
+    let app = Rc::clone(state);
+    listen("crop-overlay", "pointerdown", move |e| crop_gesture_start(&app, &e))?;
+    let app = Rc::clone(state);
+    listen("crop-overlay", "pointermove", move |e| crop_gesture_move(&app, &e))?;
+    let app = Rc::clone(state);
+    listen("crop-overlay", "pointerup", move |e| crop_gesture_end(&app, &e))?;
+    let app = Rc::clone(state);
+    listen("crop-overlay", "wheel", move |e| crop_wheel(&app, &e))?;
+    Ok(())
+}
+
+/// Corner of the crop frame being dragged or key-nudged.
+#[derive(Clone, Copy, PartialEq)]
+enum CropHandle {
+    Nw,
+    Ne,
+    Sw,
+    Se,
+}
+
+impl CropHandle {
+    fn of(handle: &str) -> Option<CropHandle> {
+        match handle {
+            "nw" => Some(CropHandle::Nw),
+            "ne" => Some(CropHandle::Ne),
+            "sw" => Some(CropHandle::Sw),
+            "se" => Some(CropHandle::Se),
+            _ => None,
+        }
+    }
+    /// Key nudge direction: arrows move the dragged corner.
+    fn moved(self, key: &str) -> Option<(f64, f64)> {
+        let (x, y) = match key {
+            "ArrowLeft" => (-1.0, 0.0),
+            "ArrowRight" => (1.0, 0.0),
+            "ArrowUp" => (0.0, -1.0),
+            "ArrowDown" => (0.0, 1.0),
+            _ => return None,
+        };
+        Some((x, y))
+    }
+}
+
+/// Cumulative layout for one overlay redraw. The wrap is sized in JS to the
+/// letterboxed picture area (the object-fit box), so it always fits the well
+/// and every overlay child hit-tests normally.
+struct CropLayout {
+    /// Source pixels per CSS pixel.
+    scale: f64,
+}
+
+impl CropLayout {
+    /// Where the current source frame sits, in wrap CSS pixels.
+    fn to_css(&self, f: &CropFrame) -> CropFrame {
+        CropFrame {
+            x: f.x * self.scale,
+            y: f.y * self.scale,
+            w: f.w * self.scale,
+            h: f.h * self.scale,
+        }
+    }
+    /// Convert a pointer position (wrap-relative) into source pixels.
+    fn to_source(&self, rect: &CropFrame, client_x: f64, client_y: f64) -> (f64, f64) {
+        (
+            (client_x - rect.x) / self.scale,
+            (client_y - rect.y) / self.scale,
+        )
+    }
+    /// Clamp a pointer position to the wrap, then map to source pixels.
+    fn clamped_source(&self, rect: &CropFrame, client_x: f64, client_y: f64) -> (f64, f64) {
+        let x = client_x.clamp(rect.x, rect.x + rect.w);
+        let y = client_y.clamp(rect.y, rect.y + rect.h);
+        self.to_source(rect, x, y)
+    }
+}
+
 /// The three artifacts the studio can save, sharing one download path.
 #[derive(Clone, Copy)]
 enum Export {
     Mosaic,
     Guide,
     Parts,
+}
+
+fn element_rect(id: &str) -> Result<CropFrame, JsValue> {
+    let rect = element(id)?.get_bounding_client_rect();
+    Ok(CropFrame {
+        x: rect.x(),
+        y: rect.y(),
+        w: rect.width(),
+        h: rect.height(),
+    })
+}
+
+/// A corner's position in source pixels.
+fn corner_point(frame: &CropFrame, corner: CropHandle) -> (f64, f64) {
+    match corner {
+        CropHandle::Nw => (frame.x, frame.y),
+        CropHandle::Ne => (frame.x + frame.w, frame.y),
+        CropHandle::Sw => (frame.x, frame.y + frame.h),
+        CropHandle::Se => (frame.x + frame.w, frame.y + frame.h),
+    }
+}
+
+/// The wrap's live position, for pointer mapping.
+fn wrap_rect() -> Result<CropFrame, JsValue> {
+    element_rect("crop-wrap")
+}
+
+/// Size the wrap to the picture's object-fit area inside the well and return
+/// the resulting layout. Called on every paint so window resizes and media
+/// queries stay exact.
+fn crop_layout(raster: &Raster) -> Result<CropLayout, JsValue> {
+    let well: HtmlElement = element("original-well")?.dyn_into()?;
+    let cw = f64::from(well.client_width());
+    let ch = f64::from(well.client_height());
+    if cw < 1.0 || ch < 1.0 || raster.width == 0 || raster.height == 0 {
+        return Err(JsValue::from_str("Image layout is not ready yet"));
+    }
+    let scale = (cw / raster.width as f64).min(ch / raster.height as f64);
+    let pw = raster.width as f64 * scale;
+    let ph = raster.height as f64 * scale;
+    let wrap: HtmlElement = element("crop-wrap")?.dyn_into()?;
+    let style = wrap.style();
+    style.set_property("width", &format!("{:.2}px", pw))?;
+    style.set_property("height", &format!("{:.2}px", ph))?;
+    style.set_property("left", &format!("{:.2}px", (cw - pw) * 0.5))?;
+    style.set_property("top", &format!("{:.2}px", (ch - ph) * 0.5))?;
+    Ok(CropLayout { scale })
 }
 
 fn download(state: &Shared, which: Export) -> Result<(), JsValue> {
@@ -1170,6 +1721,13 @@ pub fn start() -> Result<(), JsValue> {
         hidden("error", true)?;
         mark_pending(&app)
     })?;
+    // Select controls fire `change` consistently across browser engines.
+    let app = Rc::clone(&state);
+    listen("settings", "change", move |_| {
+        update_labels()?;
+        mark_pending(&app)?;
+        refresh_crop_overlay(&app)
+    })?;
     let app = Rc::clone(&state);
     listen("settings", "input", move |event| {
         if event
@@ -1180,15 +1738,30 @@ pub fn start() -> Result<(), JsValue> {
             return Ok(());
         }
         update_labels()?;
-        mark_pending(&app)
+        mark_pending(&app)?;
+        refresh_crop_overlay(&app)
     })?;
-    // Select controls fire `change` consistently across browser engines.
-    let app = Rc::clone(&state);
-    listen("settings", "change", move |_| {
-        update_labels()?;
-        mark_pending(&app)
-    })?;
+    listen_crop(&state)?;
+    // The frame must track the picture when the window or preview resizes.
+    {
+        let app = Rc::clone(&state);
+        let callback = Closure::<dyn FnMut()>::new(move || {
+            if let Err(error) = refresh_crop_overlay(&app) {
+                web_sys::console::error_1(&error);
+            }
+        });
+        web_sys::window()
+            .ok_or_else(|| JsValue::from_str("Window unavailable"))?
+            .add_event_listener_with_callback("resize", callback.as_ref().unchecked_ref())?;
+        callback.forget();
+    }
     listen("zoom", "input", |_| apply_zoom())?;
+    let app = Rc::clone(&state);
+    listen("fit", "change", move |_| {
+        update_labels()?;
+        mark_pending(&app)?;
+        refresh_crop_overlay(&app)
+    })?;
     let app = Rc::clone(&state);
     listen("export-svg", "click", move |_| {
         download(&app, Export::Mosaic)
