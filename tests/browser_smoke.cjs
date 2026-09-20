@@ -29,6 +29,11 @@ let browser;
   const c=document.createElement('canvas'); c.width=64;c.height=64;const x=c.getContext('2d');x.fillStyle='white';x.fillRect(0,0,64,64);x.fillStyle='black';x.fillRect(0,0,64,32);
   const blob=await new Promise(r=>c.toBlob(r));const d=new DataTransfer();d.items.add(new File([blob],'test.png',{type:'image/png'}));document.querySelector('#image').files=d.files;document.querySelector('#image').dispatchEvent(new Event('change',{bubbles:true}));
  }); await ready();
+ // The original preview must render inside the Original well: the crop
+ // wrap is absolutely positioned, so an unanchored well would drop the
+ // picture at the page's top-left area instead (regression guard).
+ await page.waitForFunction(()=>{const w=document.querySelector('#original-well').getBoundingClientRect(),i=document.querySelector('#original').getBoundingClientRect();return !document.querySelector('#original').hidden&&i.width>0&&i.left>=w.left-0.5&&i.right<=w.right+0.5&&i.top>=w.top-0.5&&i.bottom<=w.bottom+0.5;});
+ console.log('PASS original preview stays inside the Original well');
  async function set(id,val){await page.locator('#'+id).evaluate((el,v)=>{el.value=String(v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));},val);}
  async function build(){await page.click('#go');await ready();assert.equal(await page.locator('#error').isVisible(),false,await page.locator('#error').innerText());await page.waitForFunction(()=>{const i=document.querySelector('#mosaic-image');return !i.hidden&&i.complete&&i.naturalWidth>0;});}
  async function svg(){return page.locator('#mosaic-image').evaluate(async i=>await(await fetch(i.src)).text());}
