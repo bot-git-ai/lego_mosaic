@@ -18,7 +18,9 @@ use web_sys::{
     WheelEvent,
 };
 
-use crate::mosaic::{crop_frame, crop_frame_options, FitMode, HueMode, Mosaic, Options, Order, Raster};
+use crate::mosaic::{
+    crop_frame, crop_frame_options, FitMode, HueMode, Mosaic, Options, Order, Raster,
+};
 use crate::{palette, render};
 
 type Shared = Rc<RefCell<App>>;
@@ -1169,7 +1171,8 @@ fn crop_gesture_start(state: &Shared, event: &Event) -> Result<(), JsValue> {
         .crop
         .drawn
         .ok_or_else(|| JsValue::from_str("Crop frame is not ready"))?;
-    let (px, py) = layout.clamped_source(&rect, pointer.client_x().into(), pointer.client_y().into());
+    let (px, py) =
+        layout.clamped_source(&rect, pointer.client_x().into(), pointer.client_y().into());
     // Corners: store the offset from the grabbed corner. Pans: the grab
     // point inside the frame; movement shifts the frame by the same delta.
     let (grab_x, grab_y) = match corner {
@@ -1223,12 +1226,17 @@ fn crop_gesture_move(state: &Shared, event: &Event) -> Result<(), JsValue> {
         .ok_or_else(|| JsValue::from_str("Pointer event expected"))?;
     let layout = crop_layout(&raster)?;
     let rect = wrap_rect()?;
-    let (px, py) = layout.clamped_source(&rect, pointer.client_x().into(), pointer.client_y().into());
+    let (px, py) =
+        layout.clamped_source(&rect, pointer.client_x().into(), pointer.client_y().into());
     let frame = match drag.corner {
         // The grabbed corner follows the pointer minus the grab offset.
-        Some(corner) => {
-            anchored_frame(&drag.origin, corner, px - drag.grab_x, py - drag.grab_y, &raster)
-        }
+        Some(corner) => anchored_frame(
+            &drag.origin,
+            corner,
+            px - drag.grab_x,
+            py - drag.grab_y,
+            &raster,
+        ),
         None => {
             let start = drag.origin;
             let x = (px - drag.grab_x).clamp(0.0, (raster.width as f64 - start.w).max(0.0));
@@ -1247,7 +1255,10 @@ fn crop_gesture_end(state: &Shared, event: &Event) -> Result<(), JsValue> {
     }
     event.prevent_default();
     state.borrow_mut().crop.drag = None;
-    if let Some(target) = event.target().and_then(|t| t.dyn_into::<HtmlElement>().ok()) {
+    if let Some(target) = event
+        .target()
+        .and_then(|t| t.dyn_into::<HtmlElement>().ok())
+    {
         if let Some(pointer) = event.dyn_ref::<PointerEvent>() {
             let _ = target.release_pointer_capture(pointer.pointer_id());
         }
@@ -1279,7 +1290,11 @@ fn crop_wheel(state: &Shared, event: &Event) -> Result<(), JsValue> {
         .crop
         .drawn
         .ok_or_else(|| JsValue::from_str("Crop frame is not ready"))?;
-    let factor = if wheel.delta_y() > 0.0 { 1.1 } else { 1.0 / 1.1 };
+    let factor = if wheel.delta_y() > 0.0 {
+        1.1
+    } else {
+        1.0 / 1.1
+    };
     // Keep the point under the wheel visually fixed while resizing: with
     // f = (pointer - frame) clamped into the frame, new x = f - f·(w'/w).
     let rect = wrap_rect()?;
@@ -1350,7 +1365,9 @@ fn cell_size(raster: &Raster) -> f64 {
     let cols = raster.width as f64 / 16.0;
     let rows = raster.height as f64 / 16.0;
     let cells = cols.max(rows).ceil().max(1.0);
-    (raster.width as f64 / cells).max(raster.height as f64 / cells).max(1.0)
+    (raster.width as f64 / cells)
+        .max(raster.height as f64 / cells)
+        .max(1.0)
 }
 
 /// Frame after moving `handle`'s corner to a point: opposite corner pinned,
@@ -1373,14 +1390,16 @@ fn anchored_frame(
         CropHandle::Sw => (origin.x + origin.w, origin.y),
         CropHandle::Se => (origin.x, origin.y),
     };
-    let dx = (corner_x - px) * match handle {
-        CropHandle::Nw | CropHandle::Sw => 1.0,
-        _ => -1.0,
-    };
-    let dy = (corner_y - py) * match handle {
-        CropHandle::Nw | CropHandle::Ne => 1.0,
-        _ => -1.0,
-    };
+    let dx = (corner_x - px)
+        * match handle {
+            CropHandle::Nw | CropHandle::Sw => 1.0,
+            _ => -1.0,
+        };
+    let dy = (corner_y - py)
+        * match handle {
+            CropHandle::Nw | CropHandle::Ne => 1.0,
+            _ => -1.0,
+        };
     // Choose the extent: the dominant axis keeps grid aspect.
     let mut w = dx.abs().max(dy.abs() * aspect);
     w = w.clamp(min_side, raster.width as f64);
@@ -1410,23 +1429,37 @@ fn listen_crop(state: &Shared) -> Result<(), JsValue> {
     for name in ["nw", "ne", "sw", "se"] {
         let app = Rc::clone(state);
         let handle = name.to_string();
-        listen(&format!("crop-handle-{handle}"), "pointerdown", move |e| crop_gesture_start(&app, &e))?;
+        listen(&format!("crop-handle-{handle}"), "pointerdown", move |e| {
+            crop_gesture_start(&app, &e)
+        })?;
         let app = Rc::clone(state);
         let handle = name.to_string();
-        listen(&format!("crop-handle-{handle}"), "pointermove", move |e| crop_gesture_move(&app, &e))?;
+        listen(&format!("crop-handle-{handle}"), "pointermove", move |e| {
+            crop_gesture_move(&app, &e)
+        })?;
         let app = Rc::clone(state);
         let handle = name.to_string();
-        listen(&format!("crop-handle-{handle}"), "pointerup", move |e| crop_gesture_end(&app, &e))?;
+        listen(&format!("crop-handle-{handle}"), "pointerup", move |e| {
+            crop_gesture_end(&app, &e)
+        })?;
         let app = Rc::clone(state);
         let handle = name.to_string();
-        listen(&format!("crop-handle-{handle}"), "keydown", move |e| crop_handle_key(&app, &handle, &e))?;
+        listen(&format!("crop-handle-{handle}"), "keydown", move |e| {
+            crop_handle_key(&app, &handle, &e)
+        })?;
     }
     let app = Rc::clone(state);
-    listen("crop-overlay", "pointerdown", move |e| crop_gesture_start(&app, &e))?;
+    listen("crop-overlay", "pointerdown", move |e| {
+        crop_gesture_start(&app, &e)
+    })?;
     let app = Rc::clone(state);
-    listen("crop-overlay", "pointermove", move |e| crop_gesture_move(&app, &e))?;
+    listen("crop-overlay", "pointermove", move |e| {
+        crop_gesture_move(&app, &e)
+    })?;
     let app = Rc::clone(state);
-    listen("crop-overlay", "pointerup", move |e| crop_gesture_end(&app, &e))?;
+    listen("crop-overlay", "pointerup", move |e| {
+        crop_gesture_end(&app, &e)
+    })?;
     let app = Rc::clone(state);
     listen("crop-overlay", "wheel", move |e| crop_wheel(&app, &e))?;
     Ok(())
