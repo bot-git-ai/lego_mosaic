@@ -28,7 +28,7 @@ CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
 outputs without `--force`. It is a thin native I/O shell: every mosaic byte
 comes from the same public library (`lego_mosaic::convert`/`render`) the
 browser uses; `tests/browser_smoke.cjs` asserts byte-identical SVG between the
-two front ends. `tests/cli_smoke.py` checks exact expected SVG bytes via a
+two front ends. `tests/cli_smoke.rs` checks exact expected SVG bytes via a
 2×2 PNG. `lego-mosaic serve` (or no args) runs the web server.
 
 Server: `target/release/lego-mosaic`, default `127.0.0.1:3210`, override

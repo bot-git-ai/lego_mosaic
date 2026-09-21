@@ -491,7 +491,12 @@ fn excluded_palette(palette: &[TileColor], excluded: &[usize]) -> Vec<TileColor>
 
 /// Source-coordinate viewport. Both modes keep square source pixels;
 /// contain returns a larger virtual canvas, with its outside area white.
-pub(crate) fn viewport(image: &Raster, out_w: usize, out_h: usize, o: &Options) -> (f64, f64, f64, f64) {
+pub(crate) fn viewport(
+    image: &Raster,
+    out_w: usize,
+    out_h: usize,
+    o: &Options,
+) -> (f64, f64, f64, f64) {
     let sw = image.width as f64;
     let sh = image.height as f64;
     let sx = sw / out_w as f64;
@@ -570,8 +575,16 @@ pub fn crop_frame_options(
     // realized window is re-clamped by viewport() either way).
     let cx = fx + fw * 0.5;
     let cy = fy + fh * 0.5;
-    next.crop_x = if cx.is_finite() { (cx / sw).clamp(0.0, 1.0) } else { 0.5 };
-    next.crop_y = if cy.is_finite() { (cy / sh).clamp(0.0, 1.0) } else { 0.5 };
+    next.crop_x = if cx.is_finite() {
+        (cx / sw).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    next.crop_y = if cy.is_finite() {
+        (cy / sh).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
     next
 }
 
@@ -1281,7 +1294,13 @@ mod tests {
         // A frame equal to the whole (non-square) image is exactly the
         // default cover view: zoom must report 1.0, centered fractions.
         let image = solid(400, 200, [255, 0, 0, 255]);
-        let back = crop_frame_options(&image, 48, 48, &Options::default(), (0.0, 0.0, 400.0, 200.0));
+        let back = crop_frame_options(
+            &image,
+            48,
+            48,
+            &Options::default(),
+            (0.0, 0.0, 400.0, 200.0),
+        );
         assert_eq!(back.zoom, 1.0);
         assert!((back.crop_x - 0.5).abs() < 1e-9);
         assert!((back.crop_y - 0.5).abs() < 1e-9);
