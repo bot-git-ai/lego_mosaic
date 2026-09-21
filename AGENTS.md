@@ -16,7 +16,8 @@ cargo build --release --locked
 
 `build-wasm.sh` builds the wasm library and generates `assets/mosaic.js` and
 `assets/mosaic_bg.wasm`. BOTH are committed and embedded in the native binary.
-Rebuild them after any browser/core/palette/render change, BEFORE building the
+(`co wasm` in a repo checkout runs the equivalent build with the same pinned
+generator.) Rebuild them after any browser/core/palette/render change, BEFORE building the
 server. No npm/JS build tool is needed. A tiny dynamic-import loader in ui.html
 plus a worker bootstrap, small service-worker cache/lifecycle shell and generated
 wasm-bindgen platform bindings are the only JavaScript in the app;
