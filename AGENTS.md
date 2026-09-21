@@ -27,7 +27,7 @@ CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
 --color-limit 900 --stages-dir DIR --fit stretch --pad 0 --studs --dither --force]`, PNG/SVG output, never overwrites input or existing
 outputs without `--force`. It is a thin native I/O shell: every mosaic byte
 comes from the same public library (`lego_mosaic::convert`/`render`) the
-browser uses; `tests/browser_smoke.cjs` asserts byte-identical SVG between the
+browser uses; `tests/browser_smoke.rs` asserts byte-identical SVG between the
 two front ends. `tests/cli_smoke.rs` checks exact expected SVG bytes via a
 2×2 PNG. `lego-mosaic serve` (or no args) runs the web server.
 
@@ -101,17 +101,27 @@ are protected; near-white cleanup is conservative, not background segmentation.
 ```
 cargo clippy --all-targets -- -D warnings
 cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
-PLAYWRIGHT_MODULE=/path/to/playwright-core node tests/browser_smoke.cjs [image.png]
+cargo test --locked
 ```
 
-Browser test needs externally installed playwright-core and Chromium (default
-`/usr/bin/chromium`, override `CHROMIUM`). It starts/stops its OWN test server at
-3333; alternatively `MOSAIC_TEST_URL` tests an existing host. Tests known-image
-conversion, both row directions, worker heartbeat/cancel/error recovery, offline
-reload with worker conversion, aspect-matched grid, stable symbols, SVG/CSV downloads, persistent
-exclusions, all-excluded guard, decode recovery and module-load errors. Optional
-image also tests family remapping, dithering, 128×128 build, mobile layout and
-local-only requests. Private test images must NOT be committed.
+Browser tests run under plain `cargo test`: `tests/browser_smoke.rs` spawns
+its own server (`CARGO_BIN_EXE_lego-mosaic`, free loopback port,
+`LEGO_MOSAIC_ADDR`) and a real headless Chromium driven over CDP — no
+node/playwright dependency. Chromium must be installed (default
+`/usr/bin/chromium`, any `chromium` on `PATH` works); without one the browser
+tests skip, never fail. The harness primitives are adapted from the bot
+project's `tests/browser_js.rs`. `browser_smoke_studio_end_to_end` tests
+known-image conversion, both row directions, stable symbols, original-well
+bounding, SVG/CSV/guide downloads, persistent exclusions, the all-excluded
+guard, local-only GET-only requests and byte-identical CLI/browser SVG
+parity. `photo_parity_across_fits_matches_cli_bytes` generates a
+deterministic gradient photo in the test and asserts CLI/browser byte parity
+for preset photo / extended palette / 64×64 over contain, crop and stretch.
+Deliberately not ported from the playwright smokes: preview/mobile
+screenshots (visual artifacts), request interception (module/worker
+load-failure recovery), offline service-worker reload, worker
+heartbeat/cancel timing and interactive crop dragging — they need
+capabilities a minimal CDP client does not implement.
 
 ## Known limitations
 
@@ -128,8 +138,8 @@ local-only requests. Private test images must NOT be committed.
 Warnings are denied. Native tests use the same Rust core; browser end-to-end
 checks are essential because native tests cannot prove DOM/loader integration.
 
-Real-photo QA: `PLAYWRIGHT_MODULE=/path/to/playwright-core node tests/photo_smoke.cjs
-/path/to/astronaut.png /path/to/coffee.png`. Uses its own port 3334, compares whole
-CLI and worker SVG strings for contain/crop/stretch at 64×64, captures previews.
-Sample sources: scikit-image v0.19.3 data/astronaut.png (NASA), coffee.png (Rachel
-Michetti). Download public samples separately; do not commit personal photos.
+Real-photo QA lives in the same `tests/browser_smoke.rs`
+(`photo_parity_across_fits_matches_cli_bytes`): a deterministic 97×61
+gradient photo is generated in the test and compared byte-exactly between
+the worker/CLI front ends for contain/crop/stretch at 64×64. Nothing is
+uploaded anywhere; no personal photos are needed or committed.
