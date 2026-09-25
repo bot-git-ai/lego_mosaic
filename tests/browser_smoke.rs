@@ -1269,6 +1269,86 @@ fn upload_png(harness: &mut Harness, bytes: &[u8], filename: &str) {
     );
 }
 
+/// Upload a PNG and wait for that exact image to finish decoding. A changed
+/// natural size keeps repeated-selection tests from accepting the prior
+/// preview while the replacement is still decoding.
+fn upload_png_and_wait(
+    harness: &mut Harness,
+    bytes: &[u8],
+    filename: &str,
+    width: usize,
+    height: usize,
+) {
+    let encoded = base64_std(bytes);
+    let name = js_string(filename);
+    harness
+        .eval_async(&format!(
+            "(async () => {{ const response = await fetch( \
+               'data:image/png;base64,{encoded}'); \
+             const blob = await response.blob(); \
+             const d = new DataTransfer(); \
+             d.items.add(new File([blob], {name}, {{ type: 'image/png' }})); \
+             document.querySelector('#image').files = d.files; \
+             document.querySelector('#image').dispatchEvent( \
+               new Event('change', {{ bubbles: true }})); return true; }})()"
+        ))
+        .unwrap_or_else(|error| panic!("upload {filename}: {error}"));
+    harness.wait_for(
+        &format!(
+            "(() => {{ const i = document.querySelector('#original'); \
+             return i.complete && i.naturalWidth === {width} && \
+               i.naturalHeight === {height} && \
+               document.querySelector('#source-size').textContent.includes( \
+                 '{width} × {height}'); }})()"
+        ),
+        READY_TIMEOUT,
+        &format!("uploaded image {filename} never loaded"),
+    );
+    let src = harness
+        .eval("document.querySelector('#original').src")
+        .expect("read original source")
+        .as_str()
+        .expect("original source is a string")
+        .to_string();
+    assert!(
+        src.starts_with("data:image/png"),
+        "the original preview must retain its data URL: {src}"
+    );
+    assert!(
+        !src.starts_with("blob:"),
+        "the original is not a Blob URL: {src}"
+    );
+}
+
+/// A small deterministic PNG for browser-selection lifecycle tests.
+fn solid_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba(color));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode browser fixture PNG");
+    bytes.into_inner()
+}
+
+/// Geometry of the live original-wrap and crop frame, in CSS pixels.
+fn crop_geometry(harness: &mut Harness) -> [f64; 4] {
+    let value = harness
+        .eval(
+            "(() => { const w = document.querySelector('#crop-wrap').getBoundingClientRect(); \
+             const f = document.querySelector('#crop-frame').getBoundingClientRect(); \
+             return [w.width, w.height, f.width, f.height]; })()",
+        )
+        .expect("read crop geometry");
+    let values = value.as_array().expect("crop geometry is an array");
+    assert_eq!(values.len(), 4, "crop geometry: {value}");
+    [
+        values[0].as_f64().expect("wrap width"),
+        values[1].as_f64().expect("wrap height"),
+        values[2].as_f64().expect("frame width"),
+        values[3].as_f64().expect("frame height"),
+    ]
+}
+
 /// The symbol text of the first cell matched by `selector`.
 fn row_symbol(harness: &mut Harness, selector: &str) -> String {
     let literal = js_string(selector);
@@ -1490,6 +1570,79 @@ fn step_local_only_requests(harness: &mut Harness) {
         .as_u64()
         .expect("count is a number");
     assert_eq!(off_origin, 0, "the studio must stay on its own origin");
+}
+
+#[test]
+fn repeated_image_selection_refreshes_source_and_crop_overlay() {
+    require_chromium!();
+    let mut harness = Harness::new("replacement");
+    harness.goto("/");
+    harness.set("width", "16");
+    harness.set("height", "8");
+    harness.set("fit", "crop");
+
+    let first = solid_png(64, 32, [220, 30, 30, 255]);
+    upload_png_and_wait(&mut harness, &first, "first.png", 64, 32);
+    let first_geometry = crop_geometry(&mut harness);
+    let first_wrap_ratio = first_geometry[0] / first_geometry[1];
+    let first_frame_ratio = first_geometry[2] / first_geometry[3];
+    assert!(
+        (first_wrap_ratio - 2.0).abs() < 0.1,
+        "first source layout must use the 2:1 raster: {first_geometry:?}"
+    );
+    assert!(
+        (first_frame_ratio - 2.0).abs() < 0.1,
+        "first crop frame must follow the 2:1 raster: {first_geometry:?}"
+    );
+    harness.build();
+    let first_mosaic = harness.mosaic_svg();
+    let first_mosaic_url = harness
+        .eval("document.querySelector('#mosaic-image').src")
+        .expect("read first mosaic source")
+        .as_str()
+        .expect("first mosaic source is a string")
+        .to_string();
+    assert!(
+        first_mosaic_url.starts_with("blob:"),
+        "the first mosaic must retain a Blob URL: {first_mosaic_url}"
+    );
+
+    let second = solid_png(32, 64, [30, 30, 220, 255]);
+    upload_png_and_wait(&mut harness, &second, "second.png", 32, 64);
+    let second_geometry = crop_geometry(&mut harness);
+    let second_wrap_ratio = second_geometry[0] / second_geometry[1];
+    let second_frame_ratio = second_geometry[2] / second_geometry[3];
+    assert!(
+        (second_wrap_ratio - 0.5).abs() < 0.1,
+        "replacement source layout must use the 1:2 raster: {second_geometry:?}"
+    );
+    assert!(
+        (second_frame_ratio - 2.0).abs() < 0.1,
+        "replacement crop frame must retain the 2:1 grid aspect: {second_geometry:?}"
+    );
+    assert_ne!(
+        second_geometry, first_geometry,
+        "replacement must refresh crop geometry after image load"
+    );
+    let old_mosaic_url_gone = harness
+        .eval_async(&format!(
+            "fetch({}).then(() => false, () => true)",
+            js_string(&first_mosaic_url)
+        ))
+        .expect("probe revoked first mosaic URL")
+        .as_bool()
+        .expect("revocation probe is boolean");
+    assert!(
+        old_mosaic_url_gone,
+        "replacing the source must revoke the previous mosaic Blob URL"
+    );
+    harness.build();
+    let second_mosaic = harness.mosaic_svg();
+    assert_ne!(
+        second_mosaic, first_mosaic,
+        "the retained raster must rebuild from the replacement image"
+    );
+    harness.assert_no_page_errors();
 }
 
 // ---------------------------------------------------------------------------
