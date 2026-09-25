@@ -283,7 +283,7 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
     }
     let hi = resample(image, stage_w, stage_h, &o);
     let fitted = raster_from_srgb(&hi, stage_w, stage_h);
-    let remap_target = remap_target(&o.hue_remap, &labs);
+    let primary_target = remap_target(&o.hue_remap, &labs);
     let secondary_target = if o.secondary_remap.mode == HueMode::Auto {
         if palette.len() <= 6 {
             labs.iter()
@@ -294,7 +294,7 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
             None
         }
     } else {
-        remap_target_for_secondary(&o.secondary_remap, &labs)
+        remap_target(&o.secondary_remap, &labs)
     };
     // Tiny fixed RGB cache: deterministic canonical 6-bit/channel colors.
     // This bounds expensive CIEDE2000 matching to 262k distinct colors,
@@ -306,7 +306,7 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
     let mut recolored_rgb = Vec::with_capacity(hi.len());
     for rgb in hi {
         adjusted_rgb.push(adjust(rgb, &o));
-        let lab = preprocess_both(rgb, &o, remap_target, secondary_target);
+        let lab = preprocess_both(rgb, &o, primary_target, secondary_target);
         transformed.push(lab);
         recolored_rgb.push(lab_to_srgb(lab));
         let key = (usize::from(rgb.r >> 2) << 12)
@@ -317,7 +317,7 @@ pub fn stages(image: &Raster, palette: &[TileColor], options: &Options) -> Stage
             // sample so reversing the source never changes color decisions.
             let canonical = Srgb::new((rgb.r & 252) | 2, (rgb.g & 252) | 2, (rgb.b & 252) | 2);
             cache[key] = nearest(
-                &preprocess_both(canonical, &o, remap_target, secondary_target),
+                &preprocess_both(canonical, &o, primary_target, secondary_target),
                 &labs,
             );
         }
@@ -722,10 +722,6 @@ fn hue_saturation(rgb: Srgb) -> (f64, f64) {
         (r - g) / d + 4.0
     };
     ((h * 60.0).rem_euclid(360.0), d / max)
-}
-
-fn remap_target_for_secondary(h: &HueRemap, palette: &[Lab]) -> Option<Lab> {
-    remap_target(h, palette)
 }
 
 #[cfg(test)]

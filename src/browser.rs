@@ -50,13 +50,11 @@ type WorkerReply = (
 
 #[derive(Default)]
 struct App {
-    file: Option<File>,
     raster: Option<Raster>,
     mosaic: Option<Mosaic>,
     svg: String,
     guide: String,
     csv: String,
-    source_url: Option<String>,
     mosaic_url: Option<String>,
     exclusions: BTreeMap<String, BTreeSet<usize>>,
     busy: bool,
@@ -610,15 +608,6 @@ fn choose_file(state: &Shared, file: File) -> Result<(), JsValue> {
                 .set_src(&url);
             hidden("original", false)?;
             hidden("original-empty", true)?;
-            {
-                let app = Rc::clone(&state);
-                let once = Closure::<dyn FnMut()>::new(move || {
-                    let _ = refresh_crop_overlay(&app);
-                });
-                let image = element("original")?.dyn_into::<HtmlImageElement>()?;
-                image.set_onload(Some(once.as_ref().unchecked_ref()));
-                once.forget();
-            }
             text(
                 "filename",
                 &format!(
@@ -633,13 +622,9 @@ fn choose_file(state: &Shared, file: File) -> Result<(), JsValue> {
             )?;
             {
                 let mut app = state.borrow_mut();
-                if let Some(old) = app.source_url.replace(url) {
-                    let _ = Url::revoke_object_url(&old);
-                }
                 if let Some(old) = app.mosaic_url.take() {
                     let _ = Url::revoke_object_url(&old);
                 }
-                app.file = Some(file);
                 app.raster = Some(raster);
                 app.mosaic = None;
                 app.svg.clear();
@@ -1773,6 +1758,11 @@ pub fn start() -> Result<(), JsValue> {
         update_labels()?;
         mark_pending(&app)?;
         refresh_crop_overlay(&app)
+    })?;
+    let app = Rc::clone(&state);
+    listen("original", "load", move |_| {
+        let _ = refresh_crop_overlay(&app);
+        Ok(())
     })?;
     listen_crop(&state)?;
     // The frame must track the picture when the window or preview resizes.
