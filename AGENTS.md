@@ -1,8 +1,15 @@
-# lego_mosaic (`lego_mosaic/`)
+# lego_mosaic
 
 Mosaic Studio: private browser-side picture → LEGO tile mosaic. Both conversion
-and application behavior are Rust. The native binary provides a static HTTP host and shared-core CLI.
-Images are not uploaded or persisted. Gateway mounts this app at `/lego-mosaic/`.
+and application behavior are Rust. The native binary provides a static HTTP
+host and shared-core CLI. Images are not uploaded or persisted.
+
+AGPL-3.0-only. See `LICENSE`.
+
+This is a standalone repository. It was split out of the bot monorepo
+(`bot-git-ai/bot`), which still hosts `bot/`, `cobalt/`, `gateway/` and
+`llm-proxy/`. Nothing here depends on them; `miv` is another split-out
+sibling.
 
 ## Build and run
 
@@ -16,8 +23,7 @@ cargo build --release --locked
 
 `build-wasm.sh` builds the wasm library and generates `assets/mosaic.js` and
 `assets/mosaic_bg.wasm`. BOTH are committed and embedded in the native binary.
-(`co wasm` in a repo checkout runs the equivalent build with the same pinned
-generator.) Rebuild them after any browser/core/palette/render change, BEFORE building the
+Rebuild them after any browser/core/palette/render change, BEFORE building the
 server. No npm/JS build tool is needed. A tiny dynamic-import loader in ui.html
 plus a worker bootstrap, small service-worker cache/lifecycle shell and generated
 wasm-bindgen platform bindings are the only JavaScript in the app;
