@@ -2,7 +2,7 @@
 // AGPL License
 
 //! Minimal HTTP/1.1 server: a buffered request reader and response
-//! writer, mirroring the style of bot-web's `http` module but
+//! writer, mirroring the style of bot's `http` module but
 //! self-contained. Only what this app needs: GETs of static assets — the
 //! conversion itself runs client-side in the wasm module.
 
