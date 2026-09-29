@@ -15,71 +15,81 @@ sibling.
 
 ## Build and run
 
+Two builds, because there are two targets. Nothing generated is committed.
+
 ```
+# 1. the site: compile the crate to wasm and run the bindings generator
 rustup target add wasm32-unknown-unknown
-cargo test --locked
-cargo build --release --locked    # also writes the publishable site to ./dist
-```
-
-There is **no run step and no server**: `build.rs` writes `dist/` while the
-crate compiles, so a build leaves a publishable site behind.
-
-`assets/mosaic.js` and `assets/mosaic_bg.wasm` are **generated but committed**,
-so a clean checkout builds and publishes the site with nothing but cargo. They
-are the output of a wasm build plus a `wasm-bindgen` post-pass, and the
-generator is an external CLI rather than a cargo dependency, so that one step
-is spelled out here rather than hidden in a script:
-
-```
 cargo install wasm-bindgen-cli --version 0.2.128 --locked
-rustup target add wasm32-unknown-unknown
 cargo build --locked --lib --target wasm32-unknown-unknown --release
-wasm-bindgen --target web --no-typescript --out-dir assets --out-name mosaic \
+wasm-bindgen --target web --no-typescript --out-dir dist --out-name mosaic \
   target/wasm32-unknown-unknown/release/lego_mosaic.wasm
+
+# 2. the CLI and the rest of the site
+cargo build --release --locked
 ```
+
+Step 1 writes `dist/mosaic.js` and `dist/mosaic_bg.wasm`; step 2 adds the six
+files `build.rs` copies, and derives the service worker's cache version. The
+order matters: step 2's cache hash covers the wasm, so running it first would
+pin a version to whatever the previous build left behind.
+
+`build.rs` writes only the files it owns, in place. It does not replace
+`dist/`, so it leaves the wasm alone.
+
+There is **no run step and no server**: the build is the whole story.
+
+### After any browser/core/palette/render change
+
+Run **both** steps again, in order. Neither artefact is committed, so there is
+nothing to forget to commit, but a `dist/` built from a stale wasm will ship a
+converter that predates the source. `tests/shell.rs` checks `dist/` for
+completeness, not for freshness.
 
 `wasm-bindgen` installs to `~/.cargo/bin`, which is on `PATH` in a normal
 login shell; in a bare or non-login shell call it by absolute path
 (`~/.cargo/bin/wasm-bindgen`) or set `WASM_BINDGEN` to its location.
 
-Rebuild and commit both artifacts after any browser/core/palette/render change,
-**before** building the binary that embeds them. The version is pinned to
-`=0.2.128` in `Cargo.toml` and must match the CLI exactly; a mismatched
-generator produces bindings the runtime will not load, and the page then fails
-to start with "Studio could not start". No npm/JS build tool is needed. A tiny
-dynamic-import loader in ui.html
-plus a worker bootstrap, small service-worker cache/lifecycle shell and generated
-wasm-bindgen platform bindings are the only JavaScript in the app;
-there is no handwritten JavaScript application or raw-pointer conversion ABI.
+The version is pinned to `=0.2.128` in `Cargo.toml` and must match the CLI
+exactly; a mismatched generator produces bindings the runtime will not load,
+and the page then fails to start with "Studio could not start". No npm/JS build
+tool is needed. A tiny dynamic-import loader in ui.html plus a worker
+bootstrap, small service-worker cache/lifecycle shell and generated
+wasm-bindgen platform bindings are the only JavaScript in the app; there is no
+handwritten JavaScript application or raw-pointer conversion ABI.
 
 ## The static site
 
 The studio is a browser application; there is no server and no service.
-`build.rs` writes `dist/` during the build:
+`dist/` is its whole form, and nothing in it is committed.
 
-```
-cargo build --release      # -> dist/, 8 files, ~528K
-```
+The eight files arrive from two builds:
 
-Seven of those files are committed as they are (`src/ui.html`,
-`src/worker.js`, `src/service-worker.js`, the two icons and the two generated
-wasm artifacts). Two are derived at build time: `manifest.webmanifest`, which
-is now the committed `src/manifest.webmanifest` rather than a Rust string
-literal, and `service-worker.js`, whose cache name is pinned to a version
-derived from the bytes of every *other* shell file **and its own source** — so
-a change to the caching logic invalidates the cache too.
+- `mosaic.js` and `mosaic_bg.wasm` are written by `wasm-bindgen` (step 1
+  above) into `dist/`. They are the studio itself, and they exist nowhere
+  else in the tree.
+- The other six are copied by `build.rs` during step 2, from committed
+  sources: `src/ui.html`, `src/worker.js`, the two icons and
+  `src/manifest.webmanifest`. `service-worker.js` is the sixth, with its
+  cache name pinned to a version derived from the bytes of every other file
+  in the directory **and its own source** — so a change to the caching logic
+  invalidates the cache too, and changing the wasm moves the version.
 
-The tree is built in a staging directory and swapped in by rename, so a failed
-build cannot leave a half-updated site where a host is serving. `build.rs`
-writes the same bytes to `OUT_DIR/dist`, which is what the tests read.
+`build.rs` writes only the files it owns, each under a scratch name and
+renamed into place, so a host serving `dist/` never sees a half-written file.
+It does not replace the directory, because the wasm step owns two files in
+there; an earlier version that swapped the whole tree deleted them and left a
+publishable-looking site with no studio in it.
+
+The same bytes are written to `OUT_DIR/dist`, which is what the tests read.
 
 Everything the shell references is relative (`./mosaic.js`,
 `new URL('./', self.location.href)`, `start_url: "./"`), so one build works
 from any subdirectory. Any file host can publish it: nginx, Caddy, GitHub
 Pages, `python3 -m http.server`.
 
-`dist/` is build output and is gitignored. It is reproducible: a clean
-checkout's `cargo build` produces the same bytes.
+`dist/` is gitignored. It is reproducible: the same sources and the same
+pinned toolchain produce the same bytes.
 
 ## Tests
 
@@ -190,25 +200,3 @@ reach — the conversion is the same library the CLI tests already cover.
 - Printable HTML guide is best for normal 48/64 widths; large guides are easier
   to zoom from the downloaded vector SVG. No inventory quantity constraints,
   pricing, or verified current part availability.
-
-Warnings are denied, for the native target and for `wasm32-unknown-unknown`.
-
-The conversion is the same library the CLI tests exercise, and `tests/shell.rs`
-covers what the build emits, so the suite needs neither a browser nor an
-external tool. What this no longer covers is DOM and loader integration in a
-real browser; that is the cost of deleting the browser suites, which needed the
-server binary this project no longer has.
-
-## Known limitations
-
-- Conversion runs in a dedicated worker; main-thread image decode/copy and final
-  DOM/SVG presentation can still cause short pauses. Worker cancellation is real,
-  but does not interrupt native browser image decoding. Worker is fresh per build.
-- Retained canvas/preview max side 2048; files capped 40 MiB and decoded images
-  over 32 MP rejected. Browser decoding occurs before dimensions are known, so
-  this is NOT an absolute peak decode-memory guarantee.
-- Printable HTML guide is best for normal 48/64 widths; large guides are easier
-  to zoom from the downloaded vector SVG. No inventory quantity constraints,
-  pricing, or verified current part availability.
-
-Nothing is uploaded anywhere; no personal photos are needed or committed.
