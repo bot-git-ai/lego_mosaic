@@ -43,8 +43,9 @@ There is **no run step and no server**: the build is the whole story.
 
 Run **both** steps again, in order. Neither artefact is committed, so there is
 nothing to forget to commit, but a `dist/` built from a stale wasm will ship a
-converter that predates the source. `tests/shell.rs` checks `dist/` for
-completeness, not for freshness.
+converter that predates the source. What covers the built output is
+running the steps above: no test asserts on `dist/`, which is gitignored and so
+absent from the tree the release gate exports.
 
 `wasm-bindgen` installs to `~/.cargo/bin`, which is on `PATH` in a normal
 login shell; in a bare or non-login shell call it by absolute path
@@ -80,8 +81,6 @@ renamed into place, so a host serving `dist/` never sees a half-written file.
 It does not replace the directory, because the wasm step owns two files in
 there; an earlier version that swapped the whole tree deleted them and left a
 publishable-looking site with no studio in it.
-
-The same bytes are written to `OUT_DIR/dist`, which is what the tests read.
 
 Everything the shell references is relative (`./mosaic.js`,
 `new URL('./', self.location.href)`, `start_url: "./"`), so one build works
@@ -149,11 +148,14 @@ conversion tool, and publishing is the build's job.
   content-versioned cache, atomic install, no skipWaiting/mixed-version updates.
   Offline needs one successful online visit over HTTPS/localhost. Browser cache
   eviction or clearing site data removes offline support. Photos are never cached.
-- `ui.html`, `ui.rs`: accessible responsive static shell and loader-failure UI.
-- `assets.rs`: the app shell as a single ordered list of typed files, shared by
-  the browser bindings the page loads.
-- `build.rs`: writes the eight-file shell to `dist/` and to `OUT_DIR/dist`,
-  deriving the manifest file and the worker's content-derived cache version.
+- `ui.html`: accessible responsive static shell and loader-failure UI.
+- `ui.html`: the app shell. `build.rs` copies it into `dist/index.html` byte
+  for byte; `tests/shell.rs` asserts against the source, which is therefore
+  the same thing.
+- `build.rs`: writes the six files it owns into `dist/`, deriving the
+  worker's content-derived cache version. It leaves `dist/mosaic.js` and
+  `dist/mosaic_bg.wasm` to the wasm-bindgen step, so it writes files in place
+  rather than replacing the directory.
 - `main.rs`: argument handling only. `server.rs`, `ui.rs`, `assets.rs` and
   `dist.rs` are gone with the host and the run step.
 
