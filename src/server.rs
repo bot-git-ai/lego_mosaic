@@ -32,14 +32,6 @@ impl Response {
             body: body.into().into_bytes(),
         }
     }
-
-    pub(crate) fn html(status: u16, body: impl Into<String>) -> Self {
-        Self {
-            status,
-            content_type: "text/html; charset=utf-8",
-            body: body.into().into_bytes(),
-        }
-    }
 }
 
 fn reason(status: u16) -> &'static str {

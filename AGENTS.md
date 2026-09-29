@@ -1,8 +1,11 @@
 # lego_mosaic
 
 Mosaic Studio: private browser-side picture → LEGO tile mosaic. Both conversion
-and application behavior are Rust. The native binary provides a static HTTP
-host and shared-core CLI. Images are not uploaded or persisted.
+and application behavior are Rust. `lego-mosaic dist` generates the **static
+PWA** into `./dist` — a front-end-only site any file host can serve, with no
+server and no runtime dependency on the binary. The binary also provides a
+static host (the default action) and a shared-core CLI. Images are not uploaded
+or persisted.
 
 AGPL-3.0-only. See `LICENSE`.
 
@@ -15,19 +18,68 @@ sibling.
 
 ```
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.128 --locked
-./build-wasm.sh
 cargo test --locked
 cargo build --release --locked
+cargo run --release -- dist    # generate the static PWA into ./dist
 ```
 
-`build-wasm.sh` builds the wasm library and generates `assets/mosaic.js` and
-`assets/mosaic_bg.wasm`. BOTH are committed and embedded in the native binary.
-Rebuild them after any browser/core/palette/render change, BEFORE building the
-server. No npm/JS build tool is needed. A tiny dynamic-import loader in ui.html
+`assets/mosaic.js` and `assets/mosaic_bg.wasm` are **generated but committed**,
+so a clean checkout builds and publishes the site with nothing but cargo. They
+are the output of a wasm build plus a `wasm-bindgen` post-pass, and the
+generator is an external CLI rather than a cargo dependency, so that one step
+is spelled out here rather than hidden in a script:
+
+```
+cargo install wasm-bindgen-cli --version 0.2.128 --locked
+rustup target add wasm32-unknown-unknown
+cargo build --locked --lib --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --no-typescript --out-dir assets --out-name mosaic \
+  target/wasm32-unknown-unknown/release/lego_mosaic.wasm
+```
+
+`wasm-bindgen` installs to `~/.cargo/bin`, which is on `PATH` in a normal
+login shell; in a bare or non-login shell call it by absolute path
+(`~/.cargo/bin/wasm-bindgen`) or set `WASM_BINDGEN` to its location.
+
+Rebuild and commit both artifacts after any browser/core/palette/render change,
+**before** building the binary that embeds them. The version is pinned to
+`=0.2.128` in `Cargo.toml` and must match the CLI exactly; a mismatched
+generator produces bindings the runtime will not load, and the page then fails
+to start with "Studio could not start". No npm/JS build tool is needed. A tiny
+dynamic-import loader in ui.html
 plus a worker bootstrap, small service-worker cache/lifecycle shell and generated
 wasm-bindgen platform bindings are the only JavaScript in the app;
 there is no handwritten JavaScript application or raw-pointer conversion ABI.
+
+## Static build (no server required)
+
+The studio is a browser application; the host only delivers the shell. The
+same shell is therefore exportable as plain files:
+
+```
+cargo run --release -- dist [DIR]     # default DIR: ./dist
+```
+
+`dist` writes the eight-file app shell (see `assets.rs`) into `./dist`. It is a
+static generator: the published site needs a file host, not this binary. The
+bare `lego-mosaic` still starts the built-in host, which the browser tests
+depend on — they spawn the binary with no arguments and poll `/healthz`. Any
+static host, CDN or file server can publish the generated output — nginx,
+Caddy, GitHub Pages, `python3 -m http.server`.
+
+Everything the shell references is relative (`./mosaic.js`, `new URL('./',…)`,
+`start_url: "./"`), so it runs unchanged from a subdirectory. The output is
+built in a sibling staging directory and swapped into place, and a rebuild
+replaces the directory wholesale, so a failed run or a dropped asset cannot
+leave a stale shell where a host is serving.
+
+`assets.rs` is the single source of truth for the shell: `serve` and `dist`
+are two deliveries of the same asset list, and a test asserts the host's bytes
+equal the exported ones. Two files are generated rather than copied: the
+manifest, and the service worker, whose cache name is pinned to a
+content-derived version at build time (unchanged logic, just moved off the
+per-request path). The version ignores the runtime scope segment, so one build
+mounted at two prefixes shares a cache.
 
 CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
 --size 64 --palette extended --preset photo --recipe o.json --save-recipe o.json
@@ -36,7 +88,8 @@ outputs without `--force`. It is a thin native I/O shell: every mosaic byte
 comes from the same public library (`lego_mosaic::convert`/`render`) the
 browser uses; `tests/browser_smoke.rs` asserts byte-identical SVG between the
 two front ends. `tests/cli_smoke.rs` checks exact expected SVG bytes via a
-2×2 PNG. `lego-mosaic serve` (or no args) runs the web server.
+2×2 PNG. `lego-mosaic serve` (or no args) runs the built-in host;
+`lego-mosaic dist [DIR]` writes the static PWA described above.
 
 Server: `target/release/lego-mosaic`, default `127.0.0.1:3210`, override
 `LEGO_MOSAIC_ADDR`. Unit `lego-mosaic.service`. Routes are prefix-free:
@@ -83,6 +136,9 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
   Offline needs one successful online visit over HTTPS/localhost. Browser cache
   eviction or clearing site data removes offline support. Photos are never cached.
 - `ui.html`, `ui.rs`: accessible responsive static shell and loader-failure UI.
+- `assets.rs`: the app shell as a single ordered list of typed files, shared by
+  the host and `dist`; owns the manifest and the content-derived worker cache
+  version. `dist.rs`: writes that list to a directory via a staging swap.
 - `main.rs`, `server.rs`: static host, no image API.
 
 ## Illustration recoloring

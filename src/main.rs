@@ -1,11 +1,15 @@
 // Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 // AGPL License
 
-//! LEGO Mosaic Studio: a static host for a Rust/WebAssembly browser app.
-//! Images never leave the browser. Routes here are prefix-free; gateway
-//! mounts the app at `/lego-mosaic/` and strips that prefix.
+//! LEGO Mosaic Studio: a browser app. Images never leave the browser.
+//! The default action — `dist` — writes the app shell to a directory as a
+//! static, front-end-only PWA that any file host can publish. `serve` remains
+//! only as a convenience for local development. There is no image API in
+//! either, and nothing in the generated output needs this binary at runtime.
 
+mod assets;
 mod cli;
+mod dist;
 mod server;
 mod ui;
 
@@ -24,19 +28,20 @@ impl Drop for Connection {
     }
 }
 
-// Generated together by build-wasm.sh; embedded for self-contained releases.
-const WASM: &[u8] = include_bytes!("../assets/mosaic_bg.wasm");
-const BINDINGS: &str = include_str!("../assets/mosaic.js");
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if !args.is_empty() && args != ["serve"] {
+    // The bare binary keeps serving: `serve` is the default action, and the
+    // browser tests spawn the binary with no arguments and poll `/healthz`.
+    // The static generator is the explicit `dist`.
+    if !args.is_empty() && args[0] != "serve" {
         if args == ["--help"] || args == ["-h"] {
             println!("{}", cli::help());
             return;
         }
         let result = if args[0] == "convert" {
             cli::run(&args[1..])
+        } else if args[0] == "dist" {
+            dist_command(&args[1..])
         } else {
             Err(format!("Unknown command: {}\n{}", args[0], cli::help()))
         };
@@ -87,43 +92,49 @@ fn main() {
     }
 }
 
+/// `lego-mosaic dist [DIR]`: emit the static PWA. The default directory is
+/// `dist` beside the current one, so the documented build line needs no
+/// argument.
+fn dist_command(args: &[String]) -> Result<(), String> {
+    let mut directory = None;
+    for arg in args {
+        if arg == "--help" || arg == "-h" {
+            println!("{}", cli::help());
+            return Ok(());
+        }
+        if directory.replace(std::path::PathBuf::from(arg)).is_some() {
+            return Err("dist takes a single output directory".into());
+        }
+    }
+    let directory = directory.unwrap_or_else(|| std::path::PathBuf::from("dist"));
+    let written = dist::write(&directory)?;
+    // Name the files, so the output is self-describing in a build log.
+    eprintln!(
+        "lego-mosaic: wrote {} files to {} ({})",
+        written.len(),
+        directory.display(),
+        written.join(" ")
+    );
+    Ok(())
+}
+
 fn route(request: &server::Request) -> server::Response {
-    match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/" | "") => server::Response::html(200, ui::page()),
-        ("GET", "/mosaic_bg.wasm") => server::Response {
+    if request.method != "GET" {
+        return server::Response::text(405, "method not allowed\n");
+    }
+    if request.path == "/healthz" {
+        return server::Response::text(200, "ok\n");
+    }
+    // One asset list serves both front ends, so the host can never drift from
+    // what `dist` writes. The host keeps its prefix-free routes; the static
+    // build names the same bytes by file.
+    match assets::find(&request.path) {
+        Some(asset) => server::Response {
             status: 200,
-            content_type: "application/wasm",
-            body: WASM.to_vec(),
+            content_type: asset.content_type,
+            body: asset.body.to_vec(),
         },
-        ("GET", "/mosaic.js") => server::Response {
-            status: 200,
-            content_type: "text/javascript; charset=utf-8",
-            body: BINDINGS.as_bytes().to_vec(),
-        },
-        ("GET", "/manifest.webmanifest") => server::Response {
-            status: 200, content_type: "application/manifest+json",
-            body: br##"{"id":"./","name":"Mosaic Studio","short_name":"Mosaic","start_url":"./","scope":"./","display":"standalone","background_color":"#f4f6f8","theme_color":"#17243a","icons":[{"src":"icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},{"src":"icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}"##.to_vec(),
-        },
-        ("GET", "/icon-192.png") => server::Response {status:200,content_type:"image/png",body:include_bytes!("../assets/icon-192.png").to_vec()},
-        ("GET", "/icon-512.png") => server::Response {status:200,content_type:"image/png",body:include_bytes!("../assets/icon-512.png").to_vec()},
-        ("GET", "/service-worker.js") => {
-            // Content-derived cache version: any shell/wasm/worker change creates
-            // a fresh atomic install. Never clear other apps' origin caches.
-            use std::hash::{Hash, Hasher};
-            let mut version=std::collections::hash_map::DefaultHasher::new();
-            WASM.hash(&mut version);BINDINGS.hash(&mut version);ui::page().hash(&mut version);
-            include_str!("worker.js").hash(&mut version);
-            include_str!("service-worker.js").hash(&mut version);
-            server::Response {status:200,content_type:"text/javascript; charset=utf-8",body:include_str!("service-worker.js").replace("__VERSION__",&format!("{:x}",version.finish())).into_bytes()}
-        },
-        ("GET", "/worker.js") => server::Response {
-            status: 200,
-            content_type: "text/javascript; charset=utf-8",
-            body: include_bytes!("worker.js").to_vec(),
-        },
-        ("GET", "/healthz") => server::Response::text(200, "ok\n"),
-        ("GET", _) => server::Response::text(404, "not found\n"),
-        (_, _) => server::Response::text(405, "method not allowed\n"),
+        None => server::Response::text(404, "not found\n"),
     }
 }
 
@@ -151,7 +162,7 @@ mod tests {
         let bindings = route(&get("/mosaic.js"));
         assert_eq!(bindings.status, 200);
         assert!(bindings.content_type.starts_with("text/javascript"));
-        assert!(BINDINGS.contains("mosaic_bg.wasm"));
+        assert!(String::from_utf8_lossy(&bindings.body).contains("mosaic_bg.wasm"));
         assert_eq!(route(&get("/nope")).status, 404);
         assert_eq!(
             route(&server::Request {
@@ -161,5 +172,25 @@ mod tests {
             .status,
             405
         );
+    }
+
+    /// The host and the static build must publish identical bytes. A silent
+    /// divergence would let `serve` and a deployed `dist` behave differently
+    /// for the same release.
+    #[test]
+    fn every_served_asset_is_exactly_what_dist_writes() {
+        for asset in assets::all() {
+            let served = route(&get(asset.route));
+            assert_eq!(served.status, 200, "{} is not served", asset.name);
+            assert_eq!(
+                served.body, asset.body,
+                "{} differs between the host and dist",
+                asset.name
+            );
+            assert_eq!(served.content_type, asset.content_type);
+        }
+        // A fresh install must get a versioned worker, not the template.
+        let worker = route(&get("/service-worker.js"));
+        assert!(!worker.body.windows(11).any(|w| w == b"__VERSION__"));
     }
 }
