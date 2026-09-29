@@ -1,11 +1,10 @@
 # lego_mosaic
 
 Mosaic Studio: private browser-side picture → LEGO tile mosaic. Both conversion
-and application behavior are Rust. `lego-mosaic dist` generates the **static
-PWA** into `./dist` — a front-end-only site any file host can serve, with no
-server and no runtime dependency on the binary. The binary also provides a
-static host (the default action) and a shared-core CLI. Images are not uploaded
-or persisted.
+and application behavior are Rust. `cargo build` generates the **static PWA**
+into `./dist` — a front-end-only site any file host can serve, with no server
+and no runtime dependency on the binary. The binary itself is a conversion CLI
+and nothing more. Images are not uploaded or persisted.
 
 AGPL-3.0-only. See `LICENSE`.
 
@@ -19,9 +18,11 @@ sibling.
 ```
 rustup target add wasm32-unknown-unknown
 cargo test --locked
-cargo build --release --locked
-cargo run --release -- dist    # generate the static PWA into ./dist
+cargo build --release --locked    # also writes the publishable site to ./dist
 ```
+
+There is **no run step and no server**: `build.rs` writes `dist/` while the
+crate compiles, so a build leaves a publishable site behind.
 
 `assets/mosaic.js` and `assets/mosaic_bg.wasm` are **generated but committed**,
 so a clean checkout builds and publishes the site with nothing but cargo. They
@@ -51,52 +52,55 @@ plus a worker bootstrap, small service-worker cache/lifecycle shell and generate
 wasm-bindgen platform bindings are the only JavaScript in the app;
 there is no handwritten JavaScript application or raw-pointer conversion ABI.
 
-## Static build (no server required)
+## The static site
 
-The studio is a browser application; the host only delivers the shell. The
-same shell is therefore exportable as plain files:
+The studio is a browser application; there is no server and no service.
+`build.rs` writes `dist/` during the build:
 
 ```
-cargo run --release -- dist [DIR]     # default DIR: ./dist
+cargo build --release      # -> dist/, 8 files, ~528K
 ```
 
-`dist` writes the eight-file app shell (see `assets.rs`) into `./dist`. It is a
-static generator: the published site needs a file host, not this binary. The
-bare `lego-mosaic` still starts the built-in host, which the browser tests
-depend on — they spawn the binary with no arguments and poll `/healthz`. Any
-static host, CDN or file server can publish the generated output — nginx,
-Caddy, GitHub Pages, `python3 -m http.server`.
+Seven of those files are committed as they are (`src/ui.html`,
+`src/worker.js`, `src/service-worker.js`, the two icons and the two generated
+wasm artifacts). Two are derived at build time: `manifest.webmanifest`, which
+is now the committed `src/manifest.webmanifest` rather than a Rust string
+literal, and `service-worker.js`, whose cache name is pinned to a version
+derived from the bytes of every *other* shell file **and its own source** — so
+a change to the caching logic invalidates the cache too.
 
-Everything the shell references is relative (`./mosaic.js`, `new URL('./',…)`,
-`start_url: "./"`), so it runs unchanged from a subdirectory. The output is
-built in a sibling staging directory and swapped into place, and a rebuild
-replaces the directory wholesale, so a failed run or a dropped asset cannot
-leave a stale shell where a host is serving.
+The tree is built in a staging directory and swapped in by rename, so a failed
+build cannot leave a half-updated site where a host is serving. `build.rs`
+writes the same bytes to `OUT_DIR/dist`, which is what the tests read.
 
-`assets.rs` is the single source of truth for the shell: `serve` and `dist`
-are two deliveries of the same asset list, and a test asserts the host's bytes
-equal the exported ones. Two files are generated rather than copied: the
-manifest, and the service worker, whose cache name is pinned to a
-content-derived version at build time (unchanged logic, just moved off the
-per-request path). The version ignores the runtime scope segment, so one build
-mounted at two prefixes shares a cache.
+Everything the shell references is relative (`./mosaic.js`,
+`new URL('./', self.location.href)`, `start_url: "./"`), so one build works
+from any subdirectory. Any file host can publish it: nginx, Caddy, GitHub
+Pages, `python3 -m http.server`.
+
+`dist/` is build output and is gitignored. It is reproducible: a clean
+checkout's `cargo build` produces the same bytes.
+
+## Tests
+
+`tests/shell.rs` asserts the invariants of the *generated* site — that the page
+loads the generated bindings rather than a hand-written wasm ABI, that every
+referenced file is present and non-empty, that the worker cache is pinned to a
+real version, that URLs are relative so the site mounts anywhere, that the
+shipped wasm is the committed artifact byte for byte, and that `dist/` stays
+ignored and untracked. There are no browser tests: the shell is written by the
+build, so nothing else would notice it breaking.
 
 CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
 --size 64 --palette extended --preset photo --recipe o.json --save-recipe o.json
 --color-limit 900 --stages-dir DIR --fit stretch --pad 0 --studs --dither --force]`, PNG/SVG output, never overwrites input or existing
 outputs without `--force`. It is a thin native I/O shell: every mosaic byte
 comes from the same public library (`lego_mosaic::convert`/`render`) the
-browser uses; `tests/browser_smoke.rs` asserts byte-identical SVG between the
-two front ends. `tests/cli_smoke.rs` checks exact expected SVG bytes via a
-2×2 PNG. `lego-mosaic serve` (or no args) runs the built-in host;
-`lego-mosaic dist [DIR]` writes the static PWA described above.
+browser uses. `tests/cli_smoke.rs` checks exact expected SVG bytes via a
+2×2 PNG.
 
-Server: `target/release/lego-mosaic`, default `127.0.0.1:3210`, override
-`LEGO_MOSAIC_ADDR`. Unit `lego-mosaic.service`. Routes are prefix-free:
-`/`, `/mosaic.js`, `/mosaic_bg.wasm`, `/worker.js`, `/service-worker.js`,
-`/manifest.webmanifest`, `/icon-192.png`, `/icon-512.png`, `/healthz`; GET only. Release with Cobalt,
-then `sudo systemctl restart lego-mosaic.service`. Gateway strips the app prefix.
-Bounded HTTP connection count and I/O deadlines; assets are served no-store.
+There is no `serve` subcommand, no unit, and no `/healthz`: the binary is a
+conversion tool, and publishing is the build's job.
 
 ## Code map
 
@@ -137,9 +141,11 @@ Bounded HTTP connection count and I/O deadlines; assets are served no-store.
   eviction or clearing site data removes offline support. Photos are never cached.
 - `ui.html`, `ui.rs`: accessible responsive static shell and loader-failure UI.
 - `assets.rs`: the app shell as a single ordered list of typed files, shared by
-  the host and `dist`; owns the manifest and the content-derived worker cache
-  version. `dist.rs`: writes that list to a directory via a staging swap.
-- `main.rs`, `server.rs`: static host, no image API.
+  the browser bindings the page loads.
+- `build.rs`: writes the eight-file shell to `dist/` and to `OUT_DIR/dist`,
+  deriving the manifest file and the worker's content-derived cache version.
+- `main.rs`: argument handling only. `server.rs`, `ui.rs`, `assets.rs` and
+  `dist.rs` are gone with the host and the run step.
 
 ## Illustration recoloring
 
@@ -167,36 +173,11 @@ cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
 cargo test --locked
 ```
 
-Browser tests run under plain `cargo test`: `tests/browser_smoke.rs` spawns
-its own server (`CARGO_BIN_EXE_lego-mosaic`, free loopback port,
-`LEGO_MOSAIC_ADDR`) and a real headless Chromium driven over CDP — no
-node/playwright dependency. Chromium must be installed (default
-`/usr/bin/chromium`, any `chromium` on `PATH` works); without one the browser
-tests skip, never fail. The harness primitives are adapted from the bot
-project's `tests/browser_js.rs`. `browser_smoke_studio_end_to_end` tests
-known-image conversion, both row directions, stable symbols, original-well
-bounding, SVG/CSV/guide downloads, persistent exclusions, the all-excluded
-guard, local-only GET-only requests and byte-identical CLI/browser SVG
-parity. `photo_parity_across_fits_matches_cli_bytes` generates a
-deterministic gradient photo in the test and asserts CLI/browser byte parity
-for preset photo / extended palette / 64×64 over contain, crop and stretch.
-
-`repeated_image_selection_refreshes_source_and_crop_overlay` was removed: it
-could not be made to pass, and it was not measuring the studio. It set
-`#width`/`#height` before uploading, but both inputs sit inside `#settings`,
-which is `disabled` until the first image is decoded, so the harness's writes
-never reached the app and the crop frame was computed from the 48×48 defaults
-— 209.5×209.5 — while the test expected the 16×8 grid it believed it had
-selected. It failed intermittently on master with `[419.0, 209.5, 0.0, 0.0]`
-when the frame was sampled before the `original` element's `load` handler
-painted it. Replacement-image behaviour it also covered is asserted through the
-remaining tests; the settings-disabled timing is a property of the app, not
-something to assert from a pre-image harness.
-Deliberately not ported from the playwright smokes: preview/mobile
-screenshots (visual artifacts), request interception (module/worker
-load-failure recovery), offline service-worker reload, worker
-heartbeat/cancel timing and interactive crop dragging — they need
-capabilities a minimal CDP client does not implement.
+`tests/shell.rs` runs under plain `cargo test` with no browser and no
+external tool. It asserts the invariants of the generated site rather than
+driving it; the browser suites that used to do so needed the now-deleted
+server binary as their host, and the app has no logic a unit test cannot
+reach — the conversion is the same library the CLI tests already cover.
 
 ## Known limitations
 
@@ -210,11 +191,24 @@ capabilities a minimal CDP client does not implement.
   to zoom from the downloaded vector SVG. No inventory quantity constraints,
   pricing, or verified current part availability.
 
-Warnings are denied. Native tests use the same Rust core; browser end-to-end
-checks are essential because native tests cannot prove DOM/loader integration.
+Warnings are denied, for the native target and for `wasm32-unknown-unknown`.
 
-Real-photo QA lives in the same `tests/browser_smoke.rs`
-(`photo_parity_across_fits_matches_cli_bytes`): a deterministic 97×61
-gradient photo is generated in the test and compared byte-exactly between
-the worker/CLI front ends for contain/crop/stretch at 64×64. Nothing is
-uploaded anywhere; no personal photos are needed or committed.
+The conversion is the same library the CLI tests exercise, and `tests/shell.rs`
+covers what the build emits, so the suite needs neither a browser nor an
+external tool. What this no longer covers is DOM and loader integration in a
+real browser; that is the cost of deleting the browser suites, which needed the
+server binary this project no longer has.
+
+## Known limitations
+
+- Conversion runs in a dedicated worker; main-thread image decode/copy and final
+  DOM/SVG presentation can still cause short pauses. Worker cancellation is real,
+  but does not interrupt native browser image decoding. Worker is fresh per build.
+- Retained canvas/preview max side 2048; files capped 40 MiB and decoded images
+  over 32 MP rejected. Browser decoding occurs before dimensions are known, so
+  this is NOT an absolute peak decode-memory guarantee.
+- Printable HTML guide is best for normal 48/64 widths; large guides are easier
+  to zoom from the downloaded vector SVG. No inventory quantity constraints,
+  pricing, or verified current part availability.
+
+Nothing is uploaded anywhere; no personal photos are needed or committed.
