@@ -13,9 +13,13 @@
 //!   exactly when the shell does.
 //! * `manifest.webmanifest` is plain data and lives as a file of its own.
 //!
-//! Both are written to `OUT_DIR` as well as `dist/`: `dist/` is what gets
-//! published, and the copy under `OUT_DIR` is what the tests read, so nothing
-//! has to depend on the top-level directory being present.
+//! Everything is written to `dist/`, which is the whole site and the only copy.
+//! An earlier version mirrored the files into `OUT_DIR` so the tests could read
+//! them there, but that copy never held the wasm artefacts -- they belong to the
+//! `wasm-bindgen` step, which writes only to `dist/`. The tests were therefore
+//! asserting against a six-file subset that was not the site, and passed only
+//! where a previous build had left the real files lying around. One directory,
+//! one truth.
 //!
 //! `cargo build --release` therefore leaves a publishable site behind, and no
 //! `cargo run` step exists.
@@ -24,12 +28,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-/// The shell, in the order it is written: the version hash depends on it, and
-/// a stable order keeps that hash stable for identical content.
+/// The files this script owns, and the committed file each is copied from.
+///
+/// The two wasm artefacts are deliberately absent: they are written into
+/// `dist/` by the `wasm-bindgen` step, which runs *after* a wasm build and
+/// *before* this one. They are build output and are never committed, so they
+/// have no committed source to copy from — and this script must not delete
+/// them, because they are the studio itself.
 const SHELL: &[(&str, &str)] = &[
     ("index.html", "src/ui.html"),
-    ("mosaic.js", "assets/mosaic.js"),
-    ("mosaic_bg.wasm", "assets/mosaic_bg.wasm"),
     ("worker.js", "src/worker.js"),
     ("icon-192.png", "assets/icon-192.png"),
     ("icon-512.png", "assets/icon-512.png"),
@@ -38,7 +45,20 @@ const SHELL: &[(&str, &str)] = &[
 
 fn main() {
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+
+    // The site is built only for the host target. This script also runs during
+    // `cargo build --lib --target wasm32-unknown-unknown`, and at that moment
+    // `assets/mosaic_bg.wasm` and `assets/mosaic.js` are the *output* of that
+    // build: they do not exist yet, so writing the site there would fail on
+    // the very step that produces them. The host build that follows the
+    // wasm-bindgen pass is the one that publishes.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target != "wasm32-unknown-unknown" && target.contains("wasm") {
+        return;
+    }
+    if target.starts_with("wasm") {
+        return;
+    }
 
     // Watch the SOURCE paths, not the output names: cargo compares these
     // against real files, so `service-worker.js` and `ui.html` have to be
@@ -72,10 +92,7 @@ fn main() {
 
     built.push(("service-worker.js", worker.into_bytes()));
 
-    // Both destinations, written the same way, so they cannot disagree.
-    for dir in [root.join("dist"), out.join("dist")] {
-        write_tree(&dir, &built);
-    }
+    write_tree(&root.join("dist"), &built);
 }
 
 /// A cache name derived from the bytes of every shell file except the worker.
@@ -93,39 +110,29 @@ fn cache_version(built: &[(&str, Vec<u8>)], worker_template: &str) -> String {
     format!("{:x}", hasher.finish())
 }
 
-/// Write every file into `dir`, replacing the directory wholesale.
+/// Write every file this script owns into `dir`, in place.
 ///
-/// A partial tree would be worse than none: a dropped asset left beside a
-/// newer one is exactly the stale shell a service worker cannot notice. The
-/// swap is a directory rename, so a failure mid-write leaves the previous tree
-/// untouched rather than half-overwritten.
+/// An earlier version built a staging tree and renamed it over `dist/`, which
+/// is right when the script owns the whole directory. It does not any more:
+/// the wasm artefacts are written into `dist/` by the `wasm-bindgen` step,
+/// which runs before this one, and a wholesale swap deleted them -- leaving a
+/// publishable-looking `dist/` with no studio in it and no error. So only the
+/// files named above are written, and the rest of the directory is untouched.
+///
+/// Each is written under a scratch name and renamed over its target, so a host
+/// serving the directory never observes a half-written file.
 fn write_tree(dir: &Path, built: &[(&str, Vec<u8>)]) {
-    let staging = dir.with_extension("new");
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)
-        .unwrap_or_else(|error| panic!("{}: {error}", staging.display()));
+    std::fs::create_dir_all(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
 
     for (name, bytes) in built {
-        let path = staging.join(name);
+        let path = dir.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create shell directory");
         }
-        std::fs::write(&path, bytes)
-            .unwrap_or_else(|error| panic!("writing {}: {error}", path.display()));
+        let scratch = dir.join(format!(".{name}.new"));
+        std::fs::write(&scratch, bytes)
+            .unwrap_or_else(|error| panic!("writing {}: {error}", scratch.display()));
+        std::fs::rename(&scratch, &path)
+            .unwrap_or_else(|error| panic!("publishing {}: {error}", path.display()));
     }
-
-    let previous = dir.with_extension("old");
-    let _ = std::fs::remove_dir_all(&previous);
-    // `rename` onto an existing directory fails on Linux, so move the old one
-    // aside first and only then put the new one in place.
-    if dir.exists() {
-        std::fs::rename(dir, &previous)
-            .unwrap_or_else(|error| panic!("moving aside {}: {error}", dir.display()));
-    }
-    if let Err(error) = std::fs::rename(&staging, dir) {
-        // Put the previous tree back rather than leaving nothing behind.
-        let _ = std::fs::rename(&previous, dir);
-        panic!("publishing {}: {error}", dir.display());
-    }
-    let _ = std::fs::remove_dir_all(&previous);
 }
