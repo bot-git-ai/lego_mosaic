@@ -28,6 +28,27 @@ wasm, so running it first would pin that to the previous build.
 `cargo test --locked` needs none of the above — it runs without the wasm target
 or the bindings generator.
 
+### In CI
+
+`.github/workflows/build.yml` runs the two steps in that order on every push to
+`master` and every pull request, then checks the site they produced, runs
+`cargo test` and both clippy passes, and uploads `dist/` as an artifact. It
+publishes nothing.
+
+It fetches the pinned generator as the official prebuilt binary rather than
+`cargo install`ing it, and verifies the download twice: against the checksum
+published with the release, and against a digest recorded in the workflow
+itself, which is what catches a re-uploaded release.
+
+The check on `dist/` is the part worth knowing about. `dist/` is gitignored, so
+no test can assert on it — the exported tree the release gate uses does not
+have it, and cannot build it. That leaves the two build steps as the only
+thing that ever exercises the site, so the workflow inspects the result
+directly: all eight files present and non-empty, nothing unexpected, the
+service worker's version placeholder substituted, and the bindings carrying
+the exports the page's dynamic import needs. A build that silently dropped
+the wasm is exactly the failure this project has already had.
+
 ### Gotchas
 
 - `wasm-bindgen` installs to `~/.cargo/bin`, which is **not** on `PATH` in a

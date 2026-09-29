@@ -191,6 +191,18 @@ driving it; the browser suites that used to do so needed the now-deleted
 server binary as their host, and the app has no logic a unit test cannot
 reach — the conversion is the same library the CLI tests already cover.
 
+`cargo build` writes `dist/` and the release gate does not carry it (see
+`tests/shell.rs`), so in a checkout the site has to be rebuilt by hand to be
+looked at. `.github/workflows/build.yml` does exactly that on every push and
+pull request, in the documented order, and then inspects what came out: eight
+files, all non-empty, no strays, the service worker's `__VERSION__` already
+substituted, and bindings that still export what the page imports. That check
+is the only automated coverage of the built site there is, and it is aimed at
+the one failure this project has already had — a `dist/` that looks publishable
+and has no studio in it. The same commands run there as run here, and the
+generator is the same pinned prebuilt, verified against the release's own
+checksum and against a digest pinned in the workflow.
+
 ## Known limitations
 
 - Conversion runs in a dedicated worker; main-thread image decode/copy and final
