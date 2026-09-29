@@ -1,0 +1,4 @@
+target/
+# Build output of `lego-mosaic` (the default action). Generated, never
+# committed — it is reproducible from the committed assets.
+dist/
