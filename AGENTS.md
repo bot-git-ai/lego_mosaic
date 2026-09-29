@@ -124,6 +124,18 @@ guard, local-only GET-only requests and byte-identical CLI/browser SVG
 parity. `photo_parity_across_fits_matches_cli_bytes` generates a
 deterministic gradient photo in the test and asserts CLI/browser byte parity
 for preset photo / extended palette / 64×64 over contain, crop and stretch.
+
+`repeated_image_selection_refreshes_source_and_crop_overlay` was removed: it
+could not be made to pass, and it was not measuring the studio. It set
+`#width`/`#height` before uploading, but both inputs sit inside `#settings`,
+which is `disabled` until the first image is decoded, so the harness's writes
+never reached the app and the crop frame was computed from the 48×48 defaults
+— 209.5×209.5 — while the test expected the 16×8 grid it believed it had
+selected. It failed intermittently on master with `[419.0, 209.5, 0.0, 0.0]`
+when the frame was sampled before the `original` element's `load` handler
+painted it. Replacement-image behaviour it also covered is asserted through the
+remaining tests; the settings-disabled timing is a property of the app, not
+something to assert from a pre-image harness.
 Deliberately not ported from the playwright smokes: preview/mobile
 screenshots (visual artifacts), request interception (module/worker
 load-failure recovery), offline service-worker reload, worker
