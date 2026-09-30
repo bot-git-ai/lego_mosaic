@@ -1600,6 +1600,110 @@ fn download(state: &Shared, which: Export) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// The scope this app's worker is registered for.
+///
+/// Stated rather than inherited, and it is the one string that has to agree
+/// with `src/service-worker.js`: the worker resolves its own directory the same
+/// way, from `self.location`. Every app on this origin is served from a
+/// sibling directory of pages that are not apps at all, and a worker
+/// registered for the whole origin does not answer just its own pages — it
+/// answers for all of them. See [`release_stale_registrations`] for the other
+/// half: a scope this small cannot be undone after the fact.
+const SCOPE: &str = "./";
+
+/// Hand this app's own URLs back to the current worker.
+///
+/// A service worker is a registration, and a registration outlives the page
+/// that made it: the browser keeps it, not the tab, and it goes on answering
+/// for its scope until something explicitly unregisters it. That is how a page
+/// on this origin can come to be served by a worker installed for a *different*
+/// page, long after the app that installed it was closed — the studio's
+/// `service-worker.js` was once registered with no scope at all, so it claimed
+/// whatever directory the page sat in, which for the site root is the entire
+/// origin. A stale registration is not corrected by a reload, by a newer
+/// version of the app, or by a newer worker installing itself: the newer worker
+/// only takes control where its own scope reaches, and a wider stale one is
+/// still in the way.
+///
+/// So the repair is explicit: find any registration whose scope covers this
+/// app's directory but is not this app's directory, and unregister it. This
+/// app's own registration is left alone, and so is every other app on the
+/// origin — each is scoped to its own directory, and a sibling that never
+/// covered us is not ours to remove.
+///
+/// Failures are ignored on purpose. This is best-effort cleanup of state this
+/// app did not create, and a browser that refuses leaves the user no worse off:
+/// the studio still runs and still caches its own assets.
+async fn release_stale_registrations() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let container = window.navigator().service_worker();
+    let Ok(registrations) = JsFuture::from(container.get_registrations()).await else {
+        return;
+    };
+    let Ok(array) = registrations.dyn_into::<js_sys::Array>() else {
+        return;
+    };
+
+    // This app's own directory, as an absolute URL with a trailing slash. The
+    // studio is served from a subdirectory and every URL of ours is inside it.
+    let Ok(home) = window.location().href() else {
+        return;
+    };
+    let Ok(ours) = web_sys::Url::new_with_base(&home, SCOPE) else {
+        return;
+    };
+    let ours = ours.href();
+
+    for entry in array.iter() {
+        let Ok(registration) = entry.dyn_into::<web_sys::ServiceWorkerRegistration>() else {
+            continue;
+        };
+        let scope = registration.scope();
+        // Leave alone any scope that is this app's own, or narrower: a sibling
+        // app mounted inside this directory is legitimate and separate, and
+        // nothing there can intercept us. One test, because the two cases are
+        // the same one: `ours` begins with `scope`.
+        if ours.starts_with(&scope) {
+            continue;
+        }
+        // What is left is a scope that is a *strict* prefix of ours: a worker
+        // that would be consulted for this app's URLs while being registered
+        // for more than this app. A worker is consulted for a URL exactly when
+        // its scope is a prefix of that URL, which is the test above inverted.
+        //
+        // Of those, only our own worker qualifies: a different app's worker
+        // lives in a different directory, so unregistering it would break the
+        // app it belongs to.
+        let script = registration
+            .active()
+            .map(|worker| worker.script_url())
+            .unwrap_or_default();
+        if script_belongs_to_app(&script, &ours) {
+            // Best-effort: a failure here leaves the app exactly as it was.
+            if let Ok(promise) = registration.unregister() {
+                let _ = JsFuture::from(promise).await;
+            }
+        }
+    }
+}
+
+/// Whether a worker script at `script` is this app's own worker, registered for
+/// more of the origin than this app's directory.
+///
+/// A wider scope means the script sits at the root of this app's own directory
+/// rather than anywhere below it: a sibling app's worker is in a sibling
+/// directory and does not match. `strip_suffix`, not `trim_end_matches` — the
+/// latter strips a *set of characters*, so it would happily eat a directory
+/// named `...e-worker.js` and call it ours.
+fn script_belongs_to_app(script: &str, ours: &str) -> bool {
+    match web_sys::Url::new(script) {
+        Ok(url) => url.href().strip_suffix("service-worker.js") == Some(ours),
+        Err(_) => false,
+    }
+}
+
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     if web_sys::window().is_none() {
@@ -1609,13 +1713,22 @@ pub fn start() -> Result<(), JsValue> {
         let result = async {
             let window = web_sys::window().ok_or_else(||JsValue::from_str("Window unavailable"))?;
             let container = window.navigator().service_worker();
-            JsFuture::from(container.register("./service-worker.js")).await?;
+            // The scope is stated rather than inherited. Left to itself a
+            // registration's scope is the directory of the page that
+            // registered it, which is right today and silently wrong the
+            // moment this app is published somewhere else, or opened through a
+            // path that resolves higher up the shared origin. Naming it keeps
+            // the claim as small as the app.
+            let options = web_sys::RegistrationOptions::new();
+            options.set_scope(SCOPE);
+            JsFuture::from(container.register_with_options("./service-worker.js", &options)).await?;
             JsFuture::from(container.ready()?).await?;
             text("offline-status", "Ready for offline use. Install Mosaic Studio from your browser menu. Only app assets are cached; images stay in memory.")
         }.await;
         if result.is_err() {
             let _=text("offline-status","Offline setup unavailable. Online conversion still works locally; offline installation needs HTTPS or localhost.");
         }
+        release_stale_registrations().await;
     });
     let state = Rc::new(RefCell::new(App::default()));
     populate_palettes()?;
