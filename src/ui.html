@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<header><div class="brand"><span class="mark" aria-hidden="true"></span><div><h1>Mosaic Studio</h1><p class="subhead">Your picture. A handful of colors. Something worth building.</p></div><span class="private">Private by design · on-device Rust</span></div></header>
+<header><div class="brand"><span class="mark" aria-hidden="true"></span><div><h1>Mosaic Studio</h1><p class="subhead">Your picture. A handful of colors. Something worth building.</p></div><span class="private">Private by design · nothing leaves your device</span></div></header>
 <main>
 <aside class="card controls" aria-label="Mosaic settings">
 <form id="form"><fieldset id="settings" disabled>
@@ -49,7 +49,7 @@
 <label class="check"><input type="checkbox" id="dither"> Dither to simulate extra tones</label><label class="range-label" for="dither_strength">Dither strength <output id="dither_strength-v">75%</output></label><input type="range" id="dither_strength" min="0" max="1" step="0.05" value="0.75"><p class="hint">Dithering adds texture and disables despeckling; keep it off for simple illustrations.</p>
 </details>
 <div class="actions"><button id="go" class="primary" type="submit">Build mosaic</button><button id="reset" type="button" title="Reset settings; keep your image">Reset</button></div>
-</fieldset><button id="cancel" type="button" hidden>Cancel build</button></form><p id="status" class="status" role="status" aria-live="polite">Loading the Rust studio…</p><div id="error" class="error" role="alert" hidden></div>
+</fieldset><button id="cancel" type="button" hidden>Cancel build</button></form><p id="status" class="status" role="status" aria-live="polite">Loading the studio…</p><div id="error" class="error" role="alert" hidden></div>
 </aside>
 <section class="workspace" aria-label="Mosaic workspace">
 <div class="workspace-head"><div><div class="eyebrow">Picture → pieces</div><h2>See the bigger picture.</h2></div><span class="pill" id="gridnote">Ready when you are</span></div>
@@ -63,12 +63,12 @@
 <section class="card output-card"><div class="output-head"><div><div class="eyebrow">One row at a time</div><h2>Build instructions</h2></div><div class="exports"><button id="print" type="button">Print build guide</button></div></div><label for="row_order">Instruction direction</label><select id="row_order" class="no-print"><option value="top">Top-down · match the picture</option><option value="bottom">Bottom-up · start at the base</option></select><p class="hint" id="row-note">Row 1 is the top of the mosaic. Build left to right, then downward. Cell numbers match the parts list; columns run left to right.</p><div id="rows" class="row-scroll" tabindex="0" aria-label="Scrollable numbered build instructions"></div></section>
 </div>
 <div class="card output-card no-print" id="output-empty"><div class="empty-output">Once built, your parts list, numbered instructions, and downloads will be ready here.</div></div>
-<p class="hint no-print" id="offline-status">Offline setup pending. Install from your browser’s app menu after opening online.</p><p class="footer">Built in Rust · processed locally · no account, no upload.<br>Independent fan-made tool. Not affiliated with or endorsed by the LEGO Group.</p>
+<p class="hint no-print" id="offline-status">Offline setup pending. Install from your browser’s app menu after opening online.</p><p class="footer">Processed locally · no account, no upload.<br>Independent fan-made tool. Not affiliated with or endorsed by the LEGO Group.</p>
 </section>
 </main>
-<noscript>This studio needs JavaScript enabled to load the Rust WebAssembly application. Your images remain local.</noscript>
+<noscript>This studio needs JavaScript enabled to run. Your images remain local.</noscript>
 <script type="module">
-import('./mosaic.js').then(m => m.default()).catch(error => { document.getElementById('status').textContent = 'Studio could not start.'; const box = document.getElementById('error'); box.hidden = false; box.textContent = 'Could not load the Rust studio. Reload the page or check your connection. ' + error; });
+import('./mosaic.js').then(m => m.default()).catch(error => { document.getElementById('status').textContent = 'Studio could not start.'; const box = document.getElementById('error'); box.hidden = false; box.textContent = 'Could not load the studio. Reload the page or check your connection. ' + error; });
 </script>
 </body>
 </html>
