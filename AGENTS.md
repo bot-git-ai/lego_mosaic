@@ -75,6 +75,10 @@ The nine files arrive from two builds:
   separately, and had already drifted: the 192 was a different pitch and a
   different radius from the 512, so an iPhone and an Android launcher showed
   different icons. Never commit a PNG — edit the SVG and rebuild.
+  The icon is the nine studs with **no background**: transparency is the
+  intent, so the launcher's own colour shows through instead of a rectangle
+  the user never asked for. `tests/shell.rs` guards that; do not add a
+  backdrop rect back.
 - The other four are copied by `build.rs` from committed sources:
   `src/ui.html`, `src/worker.js`, `assets/icon.svg` and
   `src/manifest.webmanifest`. `service-worker.js` is the ninth, with its

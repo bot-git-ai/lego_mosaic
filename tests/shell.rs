@@ -456,13 +456,20 @@ fn the_committed_icon_is_a_real_drawing() {
     let icon =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon.svg"))
             .expect("reading assets/icon.svg");
-    for (what, needle) in [
-        ("a background", "fill=\"#17243a\""),
-        ("studs", "fill=\"#f4cb46\""),
-        ("a viewBox", "viewBox="),
-    ] {
+    for (what, needle) in [("studs", "fill=\"#f4cb46\""), ("a viewBox", "viewBox=")] {
         assert!(icon.contains(needle), "the icon must keep {what}: {needle}");
     }
+    // No backdrop. The launcher already has a colour — its own, or the one the
+    // user picked — and the icon is the nine studs alone, so it shows on it
+    // rather than carrying a rectangle the user never asked for. Guarded here
+    // because it is the one edit that makes the icon worse while looking
+    // harmless: a background rect renders fine, on a home screen, until the
+    // day someone whose launcher is dark notices the dark square.
+    assert!(
+        !icon.contains("<rect"),
+        "the icon must stay the nine studs alone, with no background rect: the \
+         place it is shown supplies the colour behind it"
+    );
     // Three by three, because a mosaic that is nine studs is the app's whole
     // idea, and a dropped circle is invisible in review but obvious on a
     // home screen.
