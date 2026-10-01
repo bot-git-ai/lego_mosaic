@@ -6,22 +6,29 @@
   build, so this is what the icon *is*. A PNG is never committed and never
   edited by hand — edit this, and the PNGs follow on the next build.
 
-  The design is a 3x3 grid of studs on a dark field: the shape a LEGO mosaic
-  reduces an image to, at the size a home screen shows it.
+  The design is nine yellow studs and nothing else: the shape a LEGO mosaic
+  reduces an image to, at the size a home screen shows it. There is no
+  background, and that is deliberate — the icon takes whatever colour the
+  place it is shown already has. A field behind the studs only ever fought
+  that: on a dark launcher it was a slightly-different dark, on a light one a
+  dark square, and on a wallpaper-matched launcher a rectangle nobody asked
+  for. The studs are the mark; anything behind them is furniture.
 
   The geometry, in a 512 viewBox:
     * centres at 143, 256, 369 — pitch 113, so the 104 margin on the left
       and right is the same, and the grid is exactly centred.
     * radius 39 — the gap between studs (35) is a shade under the pitch, so
       the grid reads as separate tiles rather than a lattice.
-    * full-bleed background, because `purpose` is `any maskable` and a
-      maskable icon is cropped to whatever shape the launcher uses; a
-      background that stopped short of the edge would show through.
+    * nothing else is drawn. With no background there is nothing to run off
+      the edge, so the file simply ends after the nine circles.
+
   The outermost stud's edge sits at 198.8 from the centre, inside the 204.8
-  radius maskable safe zone, so a circular crop loses no stud.
+  radius maskable safe zone, so a circular crop — the manifest declares
+  `any maskable`, and a maskable icon is cropped to whatever shape the launcher
+  uses — loses no stud. The launcher supplies the shape; the icon only has to
+  stay inside it.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <rect width="512" height="512" fill="#17243a"/>
   <g fill="#f4cb46">
     <circle cx="143" cy="143" r="39"/>
     <circle cx="256" cy="143" r="39"/>
