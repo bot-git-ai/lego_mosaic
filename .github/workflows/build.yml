@@ -174,7 +174,7 @@ jobs:
           # whole directory and took the wasm with it, leaving a
           # publishable-looking site with no studio in it. Verify the count,
           # not the exit status.
-          expected="icon-192.png icon-512.png index.html manifest.webmanifest mosaic_bg.wasm mosaic.js service-worker.js worker.js"
+          expected="icon-192.png icon-512.png icon.svg index.html manifest.webmanifest mosaic_bg.wasm mosaic.js service-worker.js worker.js"
           missing=""
           for file in $expected; do
             if [ -s "dist/${file}" ]; then

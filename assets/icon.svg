@@ -1,0 +1,36 @@
+<!--
+  Mosaic Studio's icon, and the source of truth for it.
+
+  The site needs PNGs: the manifest declares install icons at two sizes, and
+  iOS wants an apple-touch-icon. Those are rasterized from this file during the
+  build, so this is what the icon *is*. A PNG is never committed and never
+  edited by hand — edit this, and the PNGs follow on the next build.
+
+  The design is a 3x3 grid of studs on a dark field: the shape a LEGO mosaic
+  reduces an image to, at the size a home screen shows it.
+
+  The geometry, in a 512 viewBox:
+    * centres at 143, 256, 369 — pitch 113, so the 104 margin on the left
+      and right is the same, and the grid is exactly centred.
+    * radius 39 — the gap between studs (35) is a shade under the pitch, so
+      the grid reads as separate tiles rather than a lattice.
+    * full-bleed background, because `purpose` is `any maskable` and a
+      maskable icon is cropped to whatever shape the launcher uses; a
+      background that stopped short of the edge would show through.
+  The outermost stud's edge sits at 198.8 from the centre, inside the 204.8
+  radius maskable safe zone, so a circular crop loses no stud.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#17243a"/>
+  <g fill="#f4cb46">
+    <circle cx="143" cy="143" r="39"/>
+    <circle cx="256" cy="143" r="39"/>
+    <circle cx="369" cy="143" r="39"/>
+    <circle cx="143" cy="256" r="39"/>
+    <circle cx="256" cy="256" r="39"/>
+    <circle cx="369" cy="256" r="39"/>
+    <circle cx="143" cy="369" r="39"/>
+    <circle cx="256" cy="369" r="39"/>
+    <circle cx="369" cy="369" r="39"/>
+  </g>
+</svg>

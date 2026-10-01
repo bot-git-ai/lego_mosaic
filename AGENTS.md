@@ -64,14 +64,20 @@ handwritten JavaScript application or raw-pointer conversion ABI.
 The studio is a browser application; there is no server and no service.
 `dist/` is its whole form, and nothing in it is committed.
 
-The eight files arrive from two builds:
+The nine files arrive from two builds:
 
 - `mosaic.js` and `mosaic_bg.wasm` are written by `wasm-bindgen` (step 1
   above) into `dist/`. They are the studio itself, and they exist nowhere
   else in the tree.
-- The other six are copied by `build.rs` during step 2, from committed
-  sources: `src/ui.html`, `src/worker.js`, the two icons and
-  `src/manifest.webmanifest`. `service-worker.js` is the sixth, with its
+- `icon-192.png` and `icon-512.png` are **rasterized** by `build.rs` during
+  step 2 from `assets/icon.svg`, which is the committed icon and the only
+  icon source in the tree. They used to be committed PNGs, hand-drawn
+  separately, and had already drifted: the 192 was a different pitch and a
+  different radius from the 512, so an iPhone and an Android launcher showed
+  different icons. Never commit a PNG — edit the SVG and rebuild.
+- The other four are copied by `build.rs` from committed sources:
+  `src/ui.html`, `src/worker.js`, `assets/icon.svg` and
+  `src/manifest.webmanifest`. `service-worker.js` is the ninth, with its
   cache name pinned to a version derived from the bytes of every other file
   in the directory **and its own source** — so a change to the caching logic
   invalidates the cache too, and changing the wasm moves the version.
@@ -96,9 +102,12 @@ pinned toolchain produce the same bytes.
 loads the generated bindings rather than a hand-written wasm ABI, that every
 referenced file is present and non-empty, that the worker cache is pinned to a
 real version, that URLs are relative so the site mounts anywhere, that the
-shipped wasm is the committed artifact byte for byte, and that `dist/` stays
-ignored and untracked. There are no browser tests: the shell is written by the
-build, so nothing else would notice it breaking.
+shipped wasm is the committed artifact byte for byte, that the icon has exactly
+one committed source (`assets/icon.svg`, with both PNGs generated and neither
+tracked) and that the manifest declares precisely the sizes `build.rs`
+rasterizes, and that `dist/` stays ignored and untracked. There are no browser
+tests: the shell is written by the build, so nothing else would notice it
+breaking.
 
 CLI: `lego-mosaic convert IMAGE --output mosaic.svg [--parts x.csv --guide g.svg
 --size 64 --palette extended --preset photo --recipe o.json --save-recipe o.json

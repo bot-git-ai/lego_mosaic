@@ -21,7 +21,7 @@
 //   wrong, or a stale registration from an earlier version is still in the way.
 const ROOT = new URL('./', self.location.href);
 const CACHE = 'mosaic-studio-' + ROOT.pathname + '-__VERSION__';
-const ASSETS = ['./', 'mosaic.js', 'mosaic_bg.wasm', 'worker.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'].map(p => new URL(p, ROOT).href);
+const ASSETS = ['./', 'mosaic.js', 'mosaic_bg.wasm', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'].map(p => new URL(p, ROOT).href);
 const IS_OWN = url => url.startsWith(ROOT.href);
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
