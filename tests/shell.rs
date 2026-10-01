@@ -176,7 +176,15 @@ fn the_service_worker_template_has_exactly_one_placeholder() {
 }
 
 /// Nothing generated may be tracked — not the wasm, not the bindings, not the
-/// site. This is the test that would have caught them being committed.
+/// site, and not the icons. This is the test that would have caught them being
+/// committed.
+///
+/// The two PNGs are the sharpest case. They used to be committed, and because
+/// nothing generated them they were two hand-drawn icons rather than one
+/// drawing at two resolutions: the 192 was a different pitch and a different
+/// radius from the 512, so the app showed a different icon on an iPhone than
+/// on an Android home screen. `assets/icon.svg` is now the icon, and these are
+/// its build output.
 #[test]
 fn no_build_artifact_is_committed() {
     let Some(tracked) = tracked_files() else {
@@ -185,6 +193,8 @@ fn no_build_artifact_is_committed() {
     for artefact in [
         "assets/mosaic.js",
         "assets/mosaic_bg.wasm",
+        "assets/icon-192.png",
+        "assets/icon-512.png",
         "dist/index.html",
         "dist/mosaic.js",
         "dist/mosaic_bg.wasm",
@@ -194,6 +204,10 @@ fn no_build_artifact_is_committed() {
             "{artefact} is tracked; generated artefacts must never be committed"
         );
     }
+    assert!(
+        tracked.lines().any(|line| line == "assets/icon.svg"),
+        "the icon must have exactly one committed source of truth: assets/icon.svg"
+    );
 }
 
 /// `dist/` has to be ignored, or a build would leave the next commit dirty.
@@ -249,10 +263,9 @@ fn the_worker_never_answers_outside_its_own_directory() {
 /// scope it does not own.
 #[test]
 fn the_page_states_the_scope_and_releases_a_wider_one() {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/browser.rs"),
-    )
-    .expect("reading src/browser.rs");
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/browser.rs"))
+            .expect("reading src/browser.rs");
     // Comments go first. The prose in `src/browser.rs` names these calls while
     // explaining them, so an assertion over raw text can be satisfied by the
     // explanation while the call it is about is gone: green, and proving
@@ -283,10 +296,9 @@ fn the_page_states_the_scope_and_releases_a_wider_one() {
 /// a real bug in the first version of this code.
 #[test]
 fn the_script_comparison_strips_a_suffix_rather_than_a_character_set() {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/browser.rs"),
-    )
-    .expect("reading src/browser.rs");
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/browser.rs"))
+            .expect("reading src/browser.rs");
     // Comments go first, for the reason above: the prose names the method to
     // explain why it is not used, so the assertion is about code, not a word.
     let browser = strip_rust_comments(&source);
@@ -316,10 +328,9 @@ fn the_script_comparison_strips_a_suffix_rather_than_a_character_set() {
 /// directory, or the page registers a scope the worker's guard does not match.
 #[test]
 fn the_scope_is_a_relative_directory_shared_with_the_worker() {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/browser.rs"),
-    )
-    .expect("reading src/browser.rs");
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/browser.rs"))
+            .expect("reading src/browser.rs");
     let browser = strip_rust_comments(&source);
     assert!(
         browser.contains("const SCOPE: &str = \"./\";"),
@@ -329,6 +340,137 @@ fn the_scope_is_a_relative_directory_shared_with_the_worker() {
     assert!(
         worker_template().contains("new URL('./', self.location.href)"),
         "the worker must resolve the same directory the page registered"
+    );
+}
+
+/// The icon has exactly one source of truth, and the page and the worker both
+/// reach for the file that is it.
+///
+/// A browser tab and an installed app get their icons by three different
+/// routes — the page's `<link rel="icon">`, the manifest, and the worker's
+/// precache — and each can be given a different answer. `icon.svg` is the
+/// drawing; the PNGs are rasterized from it during the build. If the page ever
+/// links a PNG while the manifest declares another, the installed icon and the
+/// tab icon drift apart, and nothing in a static site notices.
+#[test]
+fn the_svg_is_the_icon_and_the_page_links_it() {
+    let icon =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon.svg"))
+            .expect("reading assets/icon.svg");
+    assert!(
+        icon.contains("<svg"),
+        "assets/icon.svg must be an SVG, not a renamed PNG"
+    );
+    assert!(
+        icon.contains("viewBox"),
+        "an icon with no viewBox cannot be scaled to two sizes, which is the \
+         entire reason the PNGs are generated"
+    );
+
+    let page = shell();
+    assert!(
+        page.contains("href=\"./icon.svg\"") && page.contains("image/svg+xml"),
+        "the page must link the SVG as its icon"
+    );
+    // Relative, like every other URL in the shell: one build, any subdirectory.
+    assert!(
+        !page.contains("href=\"/icon.svg\""),
+        "an absolute icon URL breaks the site outside its own origin"
+    );
+    assert!(
+        worker_template().contains("'icon.svg'"),
+        "the worker must precache the SVG it publishes; an uncached icon is a \
+         blank tab icon for every offline launch"
+    );
+}
+
+/// The manifest declares exactly the icons `build.rs` rasterizes.
+///
+/// The list is written twice — once in `build.rs` and once in the committed
+/// manifest — so the two can disagree, and a manifest promising an icon that
+/// was never built is a manifest that fails only on a real home screen. This
+/// reads the sizes straight out of `build.rs` rather than restating them, so
+/// adding a size to the build is a change this test follows.
+#[test]
+fn the_manifest_declares_exactly_the_icons_the_build_rasterizes() {
+    let build = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+        .expect("reading build.rs");
+    let sizes: Vec<u32> = build
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("const ICON_SIZES: [u32; 2] = ["))
+        .and_then(|rest| rest.strip_suffix("];"))
+        .expect("build.rs must declare ICON_SIZES, the list of rasterized sizes")
+        .split(',')
+        .filter_map(|size| size.trim().parse().ok())
+        .collect();
+    assert!(
+        !sizes.is_empty(),
+        "ICON_SIZES must list the sizes to rasterize"
+    );
+
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/manifest.webmanifest"),
+        )
+        .expect("the committed manifest"),
+    )
+    .expect("the manifest is valid JSON");
+    let declared: Vec<String> = manifest["icons"]
+        .as_array()
+        .expect("the manifest must declare an icons array")
+        .iter()
+        .map(|icon| {
+            assert_eq!(
+                icon["type"], "image/png",
+                "only the generated install sizes belong in the manifest"
+            );
+            icon["sizes"]
+                .as_str()
+                .expect("an icon needs sizes")
+                .to_owned()
+        })
+        .collect();
+
+    let expected: Vec<String> = sizes.iter().map(|s| format!("{s}x{s}")).collect();
+    assert_eq!(
+        declared, expected,
+        "the manifest must declare exactly the sizes build.rs rasterizes"
+    );
+    // And the page's apple-touch-icon must be one of them, at a size iOS will
+    // not upscale into mush.
+    assert!(
+        shell().contains("href=\"./icon-192.png\""),
+        "the apple-touch-icon must be the 192 install icon"
+    );
+}
+
+/// The icon drawing, and only the icon drawing, is committed as source.
+///
+/// `assets/icon.svg` is hand-editable, so the failure worth guarding is the
+/// whole design being duplicated: once a PNG is committed alongside it, the
+/// next person to change the icon edits whichever file they find first, and
+/// the site quietly ships the old drawing. An empty or unparseable SVG is the
+/// other way this breaks, and it breaks as a blank home-screen tile.
+#[test]
+fn the_committed_icon_is_a_real_drawing() {
+    let icon =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon.svg"))
+            .expect("reading assets/icon.svg");
+    for (what, needle) in [
+        ("a background", "fill=\"#17243a\""),
+        ("studs", "fill=\"#f4cb46\""),
+        ("a viewBox", "viewBox="),
+    ] {
+        assert!(icon.contains(needle), "the icon must keep {what}: {needle}");
+    }
+    // Three by three, because a mosaic that is nine studs is the app's whole
+    // idea, and a dropped circle is invisible in review but obvious on a
+    // home screen.
+    assert_eq!(
+        icon.matches("<circle").count(),
+        9,
+        "the icon is a 3x3 grid of studs; found {} circles",
+        icon.matches("<circle").count()
     );
 }
 

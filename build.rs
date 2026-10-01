@@ -4,14 +4,17 @@
 //! Write the static app shell to `dist/` while the crate compiles.
 //!
 //! The studio is a browser application, so publishing it is a file copy, not a
-//! program run. Seven of the eight shell files are committed as they are; the
-//! other two are derived:
+//! program run. Six of the nine shell files are committed as they are; the
+//! other three are derived:
 //!
+//! * `icon-192.png` and `icon-512.png` are rasterized from `assets/icon.svg`,
+//!   which is the committed source of truth for the icon and is never replaced
+//!   by a PNG. The two sizes are the same drawing at two resolutions, so
+//!   generating them is what keeps them from drifting into two different icons.
 //! * `service-worker.js` carries a `__VERSION__` placeholder standing for a
 //!   cache name derived from the bytes of every *other* shell file. Deriving
 //!   it here rather than per request is what makes the cache name change
 //!   exactly when the shell does.
-//! * `manifest.webmanifest` is plain data and lives as a file of its own.
 //!
 //! Everything is written to `dist/`, which is the whole site and the only copy.
 //! An earlier version mirrored the files into `OUT_DIR` so the tests could read
@@ -30,6 +33,11 @@ use std::path::{Path, PathBuf};
 
 /// The files this script owns, and the committed file each is copied from.
 ///
+/// `icon.svg` is the author's original, copied unchanged: it is the icon the
+/// page links and the one a browser falls back to, and it is the same file the
+/// install PNGs are rasterized from, so the site can never link a different
+/// drawing than the one it shipped a PNG of.
+///
 /// The two wasm artefacts are deliberately absent: they are written into
 /// `dist/` by the `wasm-bindgen` step, which runs *after* a wasm build and
 /// *before* this one. They are build output and are never committed, so they
@@ -38,10 +46,16 @@ use std::path::{Path, PathBuf};
 const SHELL: &[(&str, &str)] = &[
     ("index.html", "src/ui.html"),
     ("worker.js", "src/worker.js"),
-    ("icon-192.png", "assets/icon-192.png"),
-    ("icon-512.png", "assets/icon-512.png"),
+    ("icon.svg", "assets/icon.svg"),
     ("manifest.webmanifest", "src/manifest.webmanifest"),
 ];
+
+/// The icon sizes the manifest declares, and the only two PNGs the site has.
+///
+/// One list, so the manifest and the rasterized files cannot disagree about
+/// what was built. `tests/shell.rs` reads the same two sizes out of this file
+/// to check the committed manifest against it.
+const ICON_SIZES: [u32; 2] = [192, 512];
 
 fn main() {
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -70,12 +84,13 @@ fn main() {
     println!("cargo:rerun-if-changed=src/service-worker.js");
     println!("cargo:rerun-if-changed=build.rs");
 
-    let mut built = Vec::with_capacity(SHELL.len() + 1);
+    let mut built = Vec::with_capacity(SHELL.len() + ICON_SIZES.len() + 1);
     for (name, source) in SHELL {
         let bytes = std::fs::read(root.join(source))
             .unwrap_or_else(|error| panic!("reading {source}: {error}"));
         built.push((*name, bytes));
     }
+    built.extend(rasterize_icons(&root));
 
     // The worker's own template is hashed too, and it is deliberately kept
     // out of `built` so it is hashed exactly once, in template form. A change
@@ -93,6 +108,63 @@ fn main() {
     built.push(("service-worker.js", worker.into_bytes()));
 
     write_tree(&root.join("dist"), &built);
+}
+
+/// Rasterize `assets/icon.svg` at each install size.
+///
+/// `assets/icon.svg` is the committed, authoritative, hand-editable icon: the
+/// 3x3 grid of studs that is the whole idea of the app at home-screen size.
+/// These PNGs are build output derived from it, which is why neither exists in
+/// the tree between builds. Committing them was what let the two sizes drift
+/// into two different icons — a hand-made pair of PNGs is two hand-made icons,
+/// and only one of them is ever looked at.
+///
+/// Renders straight to each size rather than rasterizing at 512 and
+/// downscaling: the source is a 512-unit viewBox, so a 192 render and a 512
+/// render differ only in output resolution and both are exact.
+fn rasterize_icons(root: &Path) -> Vec<(&'static str, Vec<u8>)> {
+    let svg = std::fs::read(root.join("assets/icon.svg"))
+        .unwrap_or_else(|error| panic!("reading assets/icon.svg: {error}"));
+    let options = usvg::Options::default();
+    let tree = usvg::Tree::from_data(&svg, &options)
+        .unwrap_or_else(|error| panic!("parsing assets/icon.svg: {error}"));
+
+    let mut icons = Vec::with_capacity(ICON_SIZES.len());
+    // `resvg` takes a `Transform`, whose fields are f32, so the scale factor
+    // has to end up as one. The width is already an f32 from `usvg`; the size
+    // is brought across through a `u16` because that widening is exact at
+    // every value f32 can hold, so no lint has to be silenced to say so.
+    let source_width = tree.size().width();
+    for size in ICON_SIZES {
+        let mut pixmap = tiny_skia::Pixmap::new(size, size)
+            .unwrap_or_else(|| panic!("a {size}x{size} pixmap: out of memory"));
+        let exact = u16::try_from(size)
+            .unwrap_or_else(|_| panic!("icon-{size}.png: sizes above 65535 make no sense"));
+        let scale = f32::from(exact) / source_width;
+        let transform = tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+        let png = pixmap
+            .encode_png()
+            .unwrap_or_else(|error| panic!("encoding icon-{size}.png: {error}"));
+        // A vector that failed to parse can render as a blank square, and an
+        // install icon that is blank is worse than a build failure: it is only
+        // ever noticed on a home screen.
+        assert!(
+            !png.is_empty() && png.len() > 100,
+            "icon-{size}.png rasterized to nothing; assets/icon.svg is empty or unrenderable"
+        );
+        icons.push((leak(format!("icon-{size}.png")), png));
+    }
+    icons
+}
+
+/// Hand a formatted name out with a `'static` lifetime.
+///
+/// The icons are built once per build and only borrowed for the length of
+/// `write_tree`, so this keeps `built` a flat list of pairs rather than
+/// threading an owned-name type through three functions.
+fn leak(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
 }
 
 /// A cache name derived from the bytes of every shell file except the worker.
