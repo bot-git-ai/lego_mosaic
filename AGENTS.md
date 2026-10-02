@@ -213,7 +213,7 @@ reach — the conversion is the same library the CLI tests already cover.
 `cargo build` writes `dist/` and the release gate does not carry it (see
 `tests/shell.rs`), so in a checkout the site has to be rebuilt by hand to be
 looked at. `.github/workflows/build.yml` does exactly that on every push and
-pull request, in the documented order, and then inspects what came out: eight
+pull request, in the documented order, and then inspects what came out: nine
 files, all non-empty, no strays, the service worker's `__VERSION__` already
 substituted, and bindings that still export what the page imports. That check
 is the only automated coverage of the built site there is, and it is aimed at
@@ -221,6 +221,33 @@ the one failure this project has already had — a `dist/` that looks publishabl
 and has no studio in it. The same commands run there as run here, and the
 generator is the same pinned prebuilt, verified against the release's own
 checksum and against a digest pinned in the workflow.
+
+`pages.yml` builds the same nine files and deploys them to GitHub Pages on
+every merge to master. It is a **separate** file from `build.yml` on purpose:
+deploying needs `pages: write` and `id-token: write` and the `github-pages`
+environment, none of which a fork's pull request has, so the build stays
+read-only and runnable by anyone who can push a branch while the thing that
+can overwrite the live site exists on exactly one ref.
+
+Two things about it are specific to this crate, and both are asserted in
+`tests/shell.rs` rather than left to review:
+
+- The bindings are generated as `--out-name mosaic`, so the site is
+  `mosaic.js`/`mosaic_bg.wasm` and the page imports `./mosaic.js`. A sibling
+  repo's workflow names the same pair `app`; copied here, it would publish a
+  site whose only real asset nothing loads.
+- The wasm step is `--lib`. This crate also has the `lego-mosaic` `[[bin]]`
+  target, the native conversion CLI, which `build.yml` builds and which the
+  host build in `pages.yml` builds too — but the binary is not part of the
+  published site, so the uploaded path is `dist/` and nothing else.
+
+Unlike the sibling `chess_clock` workflow, this one sets no
+`RUSTFLAGS: --cfg=web_sys_unstable_apis`. The studio uses no unstable
+web-sys API: `grep -ri wake src/ Cargo.toml` finds nothing, and a clean
+`cargo build --locked --lib --target wasm32-unknown-unknown --release` on an
+empty target directory succeeds with `RUSTFLAGS` unset. There is deliberately
+no `.cargo/config.toml` for the same reason. If a wake lock is ever added, the
+flag goes with it and a test here goes red to say so.
 
 ## Known limitations
 

@@ -1,0 +1,347 @@
+# Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
+# AGPL License
+#
+# Publish the studio to GitHub Pages, from the build in `build.yml`.
+#
+# Why this is a separate workflow rather than extra steps in `build.yml`:
+# Pages deploys need `pages: write` and `id-token: write` and an environment,
+# and `build.yml` runs on every pull request from a fork, where neither the
+# permission nor the environment exists. Splitting them keeps the build honest
+# -- it stays runnable by anyone who can push a branch, with read-only
+# permissions, and the thing that can overwrite the live site exists only on
+# the default branch.
+#
+# What it does NOT do is deploy on every push anywhere: `on:` is `branches:
+# [master]`, and the `deploy` job repeats that test for itself. A feature
+# branch therefore runs the whole build -- wasm, bindings, the nine-file site
+# check, tests, clippy on both targets -- and still cannot publish, so the
+# thing that overwrites the live site is reachable from exactly one ref.
+#
+# `build.yml` already runs the two build steps in the order AGENTS.md requires
+# and inspects the result. This workflow reuses nothing from it and builds
+# again rather than passing the artifact across: `upload-artifact` does not
+# preserve the executable bit or the empty directories, and the Pages artifact
+# is a tarball anyway. Two builds of a one-crate site is cheaper than debugging
+# a site that is missing its studio.
+
+name: pages
+
+# `concurrency` is not a preference here. Pages holds a single deployment slot
+# per site, and two deploys racing each other can interleave so that the older
+# one is published last -- a live site that is a version behind master, with
+# both jobs green. Cancelling the in-flight run instead means a newer commit
+# always wins the slot.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+on:
+  # Every commit that lands on master is deployed, and nothing else. A push to
+  # any other branch builds but does not publish, so a feature branch is
+  # reviewable without moving the live site.
+  push:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must match the `wasm-bindgen = "=0.2.128"` pin in Cargo.toml. A mismatched
+  # generator emits bindings the runtime will not load, and the page then fails
+  # to start with "Studio could not start" -- a failure that looks like an app
+  # bug and is not one. An *undeclared* variable is worse still: it expands to
+  # nothing, installs no generator, and every other check still passes, so this
+  # line is asserted by a test rather than trusted to review.
+  WASM_BINDGEN_VERSION: 0.2.128
+
+  # NOTE: this workflow deliberately does NOT set
+  # `RUSTFLAGS: --cfg=web_sys_unstable_apis`. That flag is what the sibling
+  # `chess_clock` workflow needs, and copying it here on the strength of the
+  # sibling alone would be cargo-culting a fact about a different crate. The
+  # studio uses no unstable web-sys API: `grep -ri wake src/ Cargo.toml` finds
+  # nothing, and a clean `cargo build --locked --lib --target
+  # wasm32-unknown-unknown --release` on a fresh target directory succeeds with
+  # RUSTFLAGS unset. Setting the flag would be dead configuration, and the
+  # absence is mutation-tested in tests/shell.rs -- so if the studio ever grows
+  # a wake lock, the red test is what says so.
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the studio
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          # The studio's target, and the only one the job needs. `dtolnay/rust-toolchain`
+          # takes the channel from `toolchain:`; `targets:` adds to it, so the two
+          # lines together are "stable, plus wasm32".
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache the Cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The wasm and the host build share a `target/` directory but not a
+          # target triple, so cache both. A wasm-only cache would miss on every
+          # host build and a host-only cache on every wasm build.
+          key: ${{ job.job }}
+
+      - name: Install the pinned wasm-bindgen generator
+        run: |
+          set -euuo pipefail
+          # The official prebuilt binary, not `cargo install`. The CLI is
+          # pinned to one exact version, and `cargo install` would compile it
+          # from source -- minutes, and a second toolchain's worth of failure
+          # surface. The release publishes a musl static binary plus a
+          # `.sha256sum` per platform, so verify against that file and fail
+          # loudly rather than generating bindings from an unverified download.
+          #
+          # The digest is checked against the release's own checksum file, and
+          # then compared to the one recorded in the repository -- here the
+          # same literal `build.yml` pins, so the two workflows cannot disagree
+          # about which download is trusted. Both checks, because they fail
+          # differently: the first catches a corrupted or truncated download,
+          # the second catches a legitimately re-uploaded release -- which is
+          # the one an attacker would want, since only they can re-upload it.
+          version="$WASM_BINDGEN_VERSION"
+          target=x86_64-unknown-linux-musl
+          asset="wasm-bindgen-${version}-${target}.tar.gz"
+          base="https://github.com/rustwasm/wasm-bindgen/releases/download/${version}"
+          pinned=b51f0208fdff83515a787bd8ab9ac5865ed84dabb66d0c709957bb59793c645f
+
+          curl --fail --location --silent --show-error --retry 3 \
+            --output "/tmp/${asset}" "${base}/${asset}"
+          curl --fail --location --silent --show-error --retry 3 \
+            --output "/tmp/${asset}.sha256sum" "${base}/${asset}.sha256sum"
+
+          # The published checksum file names the asset `gh-release/<name>`,
+          # because that is where the release workflow unpacked it, so
+          # `sha256sum -c` against the download name alone finds no file to
+          # verify. Take the digest out of that file by field and check it
+          # ourselves -- first against what we actually downloaded, which
+          # catches a corrupted or truncated transfer, and then against the
+          # digest recorded in this repository, which catches a re-uploaded
+          # release. Only the release owner can re-upload, and that is exactly
+          # the case worth refusing rather than trusting.
+          published="$(awk '{print $1}' "/tmp/${asset}.sha256sum")"
+          test -n "$published" \
+            || { echo "::error::the release published an empty checksum for ${asset}"; exit 1; }
+          actual="$(sha256sum "/tmp/${asset}" | cut -d' ' -f1)"
+          test "$actual" = "$published" \
+            || { echo "::error::${asset} does not match its published checksum (${published}, got ${actual})"; exit 1; }
+          test "$actual" = "$pinned" \
+            || { echo "::error::${asset} matches its published checksum but not the digest recorded in the repository; re-verify it before accepting this download"; exit 1; }
+          echo "${asset}: ${actual} verified against the release and the repository"
+
+          mkdir -p "$HOME/.cargo/bin"
+          tar --extract --gzip --file "/tmp/${asset}" \
+            --directory "$HOME/.cargo/bin" \
+            --strip-components 1 \
+            "wasm-bindgen-${version}-${target}/wasm-bindgen"
+          chmod +x "$HOME/.cargo/bin/wasm-bindgen"
+          # Refuse to build at all on a version mismatch, with a message that
+          # names the fix rather than leaving a broken `dist/` behind.
+          test "$("$HOME/.cargo/bin/wasm-bindgen" --version)" = "wasm-bindgen ${version}" \
+            || { echo "::error::the installed generator does not report ${version}"; exit 1; }
+          echo "wasm-bindgen $("$HOME/.cargo/bin/wasm-bindgen" --version) ready"
+
+      - name: Build the studio (wasm target)
+        run: |
+          set -eu
+          # `--lib`, and not `--all-targets` or `--bins`. This crate has a
+          # `[[bin]]` target (`lego-mosaic`, the native conversion CLI) as well
+          # as the library the site is made of, and only the library is the
+          # site. The binary is a native I/O shell: it has no part in
+          # `dist/`, and wasm32 has no useful answer for its `image` crate
+          # dependency, so building it here would add failure surface and
+          # publish nothing. The host build below builds it, exactly as
+          # `build.yml` does -- so CI still covers the CLI without the site
+          # inheriting its failures.
+          cargo build --locked --lib --target wasm32-unknown-unknown --release
+
+      - name: Generate the web bindings
+        run: |
+          set -eu
+          # Writes dist/mosaic.js and dist/mosaic_bg.wasm -- the studio
+          # itself. They exist nowhere else in the tree, and nothing committed
+          # would notice them going stale.
+          #
+          # `--out-name mosaic` is the site's name for the module, and it is
+          # also the name `src/ui.html` imports: the page loads './mosaic.js'.
+          # Renaming this to `app`, as a sibling repo's workflow does, would
+          # produce a site whose only real asset nothing loads.
+          wasm-bindgen --target web --no-typescript --out-dir dist --out-name mosaic \
+            target/wasm32-unknown-unknown/release/lego_mosaic.wasm
+
+      - name: Build the CLI and the rest of the site
+        run: |
+          set -eu
+          # `build.rs` adds the six files it owns and derives the service
+          # worker's cache version. It must run after the bindings step: the
+          # version is hashed from the bytes of every other file in `dist/`,
+          # the wasm included, so building it first would pin the cache to
+          # whatever the previous build left behind.
+          #
+          # This host build also builds the `[[bin]]` target, which is why
+          # the step is not `--lib`. That is deliberate and matches
+          # `build.yml`: the CLI is worth compiling in CI, and it is never
+          # copied into `dist/` -- the published artefact is `dist/`, and
+          # nothing outside it is uploaded.
+          #
+          # The touch is not redundant. `build.rs` runs on every build that
+          # needs it, and it writes into the source tree, not into OUT_DIR, so
+          # Cargo cannot tell that anything changed and will not re-run it for
+          # a second, otherwise identical invocation. The first build after
+          # the bindings step only recompiles the crate; the second would be a
+          # no-op and copy nothing -- leaving `dist/` with the two wasm
+          # artefacts and none of the seven shell files, which is the exact
+          # half-built site this project has hit before. A fresh CI runner has
+          # nothing to compile at all and reproduces it every time, so the
+          # step would be red on its first commit.
+          touch build.rs
+          cargo build --release --locked
+
+      - name: Check the built site
+        run: |
+          set -eu
+          # No test can assert on `dist/`: it is gitignored, so the release
+          # gate's exported tree never has it (see tests/shell.rs). The build
+          # is therefore the only thing that ever checks it -- so this checks
+          # it, rather than trusting a green job to mean the site is whole.
+          #
+          # A green build that produced eight of the nine files is exactly the
+          # failure this shape has already had in this project: `write_tree`
+          # once swapped the whole directory and took the wasm with it,
+          # leaving a publishable-looking site with no studio in it. Verify the
+          # count, not the exit status.
+          expected="icon-192.png icon-512.png icon.svg index.html manifest.webmanifest mosaic_bg.wasm mosaic.js service-worker.js worker.js"
+          missing=""
+          for file in $expected; do
+            if [ -s "dist/${file}" ]; then
+              echo "  ok   dist/${file} ($(stat -c%s "dist/${file}") bytes)"
+            else
+              missing="${missing} ${file}"
+            fi
+          done
+          # One pattern per line: `grep -x -F -v -f` reads fixed strings from
+          # a file, one per line. Matching the whole space-separated list in one
+          # pattern matches nothing, so every file reads as unexpected and the
+          # check fails on a perfectly good build.
+          #
+          # This list is also the assertion that the native CLI stayed out of
+          # it: anything the `[[bin]]` build produced would land here as an
+          # unexpected entry.
+          printf '%s\n' $expected >/tmp/expected-files
+          extra="$(cd dist && ls | grep -x -F -v -f /tmp/expected-files || true)"
+          if [ -n "$missing" ] || [ -n "$extra" ]; then
+            echo "::error::the site is incomplete -- missing:${missing:- none}; unexpected:${extra:- none}"
+            exit 1
+          fi
+          # A file of a few bytes is a truncated write, not a successful build.
+          test -s dist/mosaic_bg.wasm || { echo "::error::the studio wasm is empty"; exit 1; }
+          # The cache version is derived at build time, so an unsubstituted
+          # placeholder would ship a service worker that never invalidates.
+          if grep -q '__VERSION__' dist/service-worker.js; then
+            echo "::error::dist/service-worker.js still carries the __VERSION__ placeholder"
+            exit 1
+          fi
+          # The bindings must actually be bindings, under the name the page
+          # imports: the page loads this file with a dynamic import, so a
+          # truncated one fails only in a browser, long after the build looked
+          # fine. `mosaic.js` is the module `--out-name mosaic` produced.
+          grep -q 'export' dist/mosaic.js \
+            || { echo "::error::dist/mosaic.js carries no exports; the page's dynamic import would fail"; exit 1; }
+          # And they must carry the start function the page's `m.default()`
+          # call runs. Without it the module loads and the studio never
+          # starts, which is a failure with no error message anywhere.
+          grep -q '__wbindgen_start' dist/mosaic.js \
+            || { echo "::error::dist/mosaic.js has no start function; the studio would load and never run"; exit 1; }
+          # The icons must be real PNGs at the sizes the manifest declares,
+          # rasterized from the committed SVG. A committed PNG is what
+          # tests/shell.rs forbids; a truncated one is what this refuses.
+          for size in 192 512; do
+            test "$(head -c 8 "dist/icon-${size}.png" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" \
+              || { echo "::error::dist/icon-${size}.png is not a PNG"; exit 1; }
+          done
+          # The page must call the initializer. This is a one-line check for a
+          # failure that is otherwise completely silent -- the page renders,
+          # and does nothing.
+          grep -q 'm.default()' dist/index.html \
+            || { echo "::error::dist/index.html does not initialise the bindings; the studio would never start"; exit 1; }
+
+      - name: Run the tests
+        run: cargo test --locked
+
+      - name: Lint
+        run: |
+          set -eu
+          # Both targets, as AGENTS.md requires. The crate denies warnings,
+          # but only for the target being compiled, so a clean host build says
+          # nothing about the wasm one.
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --lib --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          # `upload-pages-artifact` is not `upload-artifact`. The Pages
+          # artifact is a single tarball the deploy action then finds *by
+          # name*, and a plain upload into the run's artifacts produces a
+          # green build followed by a deploy that cannot find what it was
+          # given. `github-pages` is this action's default name and is stated
+          # here so the deploy step's `artifact_name` has something to match.
+          name: github-pages
+          # Only `dist/`, which is the whole site. The `[[bin]]` build lands
+          # in `target/`, so nothing needs to exclude it: the path is the
+          # exclusion.
+          path: dist/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Only a build for master publishes. The trigger already says `branches:
+    # [master]`, so this is belt and braces -- but the trigger is one line
+    # above the job and this is the line that decides whether the live site is
+    # overwritten, and a pull request from a fork gets no token with
+    # `pages: write` either way. Being explicit here means a trigger widened
+    # later does not silently hand every branch a publish button.
+    if: github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-latest
+
+    # The environment is what makes the deploy require the repository's
+    # Pages approval rules, so a protected branch or a reviewer-gated
+    # environment can still hold the live site back. Without it the job would
+    # publish straight from the workflow definition.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    # The only two permissions in the file that can overwrite the live site,
+    # scoped to the one job that does it -- so a build step or a third-party
+    # action added later cannot spend them.
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          # By *name*, not by id. `deploy-pages` v5 has no `artifact_id` input
+          # -- it warns `Unexpected input(s) 'artifact_id'` and falls back to
+          # this same default -- so passing one is at best ignored and at
+          # worst names an artifact that does not exist.
+          #
+          # The name is stated rather than left to the default so the two
+          # sides are visibly the same string. `upload-pages-artifact` defaults
+          # to `github-pages` and so does this input; a mismatch between them
+          # produces a deploy that finds no artifact, and naming it on both
+          # sides makes that mismatch a diff rather than a 404 at run time.
+          artifact_name: github-pages
