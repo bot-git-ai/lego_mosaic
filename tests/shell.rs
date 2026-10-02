@@ -893,9 +893,51 @@ fn only_master_can_reach_the_live_site() {
         .split("\n  deploy:")
         .nth(1)
         .expect("pages.yml must have a `deploy:` job");
+
+    // The two halves of the gate, read out of the workflow with its comments
+    // stripped. Read this way, or the comment block above the `if:` -- which
+    // names both halves while explaining why they are there -- satisfies the
+    // assertion on its own. That is not hypothetical: it is how the `RUSTFLAGS`
+    // assertion in the sibling repository's equivalent file shipped, green,
+    // with the line commented out rather than deleted.
+    let live_gate = live
+        .split("\n  deploy:")
+        .nth(1)
+        .and_then(|job| job.split_once("if:").map(|(_, after)| after))
+        .expect("the `deploy` job must have an `if:` gate");
+
+    // Not a fork. This workflow is byte-identical in `wdomitrz/lego_mosaic` and
+    // in its fork `bot-git-ai/lego_mosaic` -- a fork exists precisely so its
+    // files can be copied -- so a gate that tests only the branch name cannot
+    // tell the two repositories apart. Both have a `master`, and the push that
+    // happens on every merge would try to publish from the fork: red at
+    // "Creating Pages deployment failed ... Ensure GitHub Pages has been
+    // enabled", because a fork has no Pages site until someone enables one by
+    // hand. And were it enabled there, the fork would serve its own copy,
+    // diverging from the published site as soon as the two masters diverge.
+    //
+    // `github.event.repository.fork` is the discriminator because it needs no
+    // configuration on either side. The obvious alternative, a repository
+    // Actions variable, has the failure mode this assertion exists to prevent:
+    // it would have to be set on the *owning* repository to publish, and no
+    // account but the user's can do that, so the gate would ship as silently
+    // off on the one repository where it matters.
     assert!(
-        deploy_job.contains("github.ref == 'refs/heads/master'"),
-        "the `deploy` job must be gated on the build being for master"
+        live_gate.contains("!github.event.repository.fork"),
+        "the `deploy` job must be gated on `!github.event.repository.fork`; this workflow is \
+         byte-identical in the fork `bot-git-ai/lego_mosaic`, so a branch-name-only gate \
+         publishes from the fork too -- failing with 'Ensure GitHub Pages has been enabled' \
+         until Pages is enabled there, and serving a divergent copy afterwards",
+    );
+    // Both halves are one condition, not two gates. An `if:` per job would be
+    // an AND across two independent gates, and a `build`-job gate would stop
+    // the *build* from running on the fork rather than just its publish -- the
+    // opposite of what this is for, since the build is what keeps the fork's
+    // copy of the site honest.
+    assert!(
+        live_gate.contains("github.ref == 'refs/heads/master'"),
+        "the fork rule must extend the master gate, not replace it: `deploy` must be one `if:` \
+         testing both `github.ref` and `github.event.repository.fork`",
     );
     assert!(
         deploy_job.contains("needs: build"),

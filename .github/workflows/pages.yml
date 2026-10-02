@@ -310,7 +310,31 @@ jobs:
     # overwritten, and a pull request from a fork gets no token with
     # `pages: write` either way. Being explicit here means a trigger widened
     # later does not silently hand every branch a publish button.
-    if: github.ref == 'refs/heads/master'
+    #
+    # And only a build for the repository that *owns* the site publishes,
+    # because this file is deliberately byte-identical in
+    # `wdomitrz/lego_mosaic` and in its fork `bot-git-ai/lego_mosaic`. A fork
+    # exists precisely so its files can be copied, so a gate that keys only on
+    # the branch name cannot tell the two apart: both have a `master`. A push to
+    # the fork's master then builds green -- the site check still runs, and
+    # should -- and dies at
+    # "Creating Pages deployment failed ... Ensure GitHub Pages has been
+    # enabled", because a fork has no Pages site of its own until someone
+    # enables one by hand. Worse, if it were enabled there the fork would serve
+    # its own copy, diverging from the published site as soon as the two
+    # masters diverge.
+    #
+    # `github.event.repository.fork` is the discriminator, and it needs no
+    # configuration on either side: false for the owning repository, true for
+    # the fork, supplied by the event itself. An earlier version of this gate
+    # used a repository Actions variable instead (`vars.PUBLISH_PAGES`), which
+    # reads as more explicit and is strictly worse: it would have to be set to
+    # `true` on `wdomitrz/lego_mosaic`, and this account holds only `pull`
+    # there, so the setting that publishes the live site would be one nobody
+    # but the user could make. A gate that must be configured before it works
+    # ships as silently off, and a silently-off deploy gate on the repository
+    # that owns the site is a worse failure than a red fork run.
+    if: github.ref == 'refs/heads/master' && !github.event.repository.fork
     needs: build
     runs-on: ubuntu-latest
 
