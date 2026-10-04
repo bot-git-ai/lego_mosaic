@@ -5,8 +5,12 @@
 //! Exact fractional area resampling (including alpha over white) avoids
 //! aliasing. Sharp uses sub-stud coverage and protects dark line work;
 //! Smooth averages linear light. Both dither at the *final stud* resolution.
-//! See CORE_API.md for JSON fields, bounds, and preset recipes.
+//!
+//! `Options` is the JSON surface: serde defaults the missing fields and
+//! `Options::sanitized` clamps every value into range.
 #![allow(
+    // Grid indices, pixel offsets and 8-bit samples are converted between
+    // integer types throughout; all values are in range by construction.
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
@@ -400,10 +404,10 @@ pub fn convert(image: &Raster, palette: &[TileColor], options: &Options) -> Mosa
     stages(image, palette, options).mosaic
 }
 
-/// Enforce `color_limit` `color_limit`: reassign overflow tiles to the nearest open
-/// color (deterministic scan order), protecting outline-preserved studs
-/// (confidence 1.0) until nothing else remains. Reports per-color excess
-/// that could not be absorbed — the caller decides how to surface it.
+/// Reassign tiles of over-cap colors to the nearest color that still has
+/// capacity, in deterministic scan order. Studs the outline pass preserved
+/// (confidence 1.0) are moved last; returns the per-color excess that could
+/// not be absorbed, for the caller to surface.
 fn enforce_color_limit(
     grid: &mut [usize],
     cells: &[Lab],
@@ -916,9 +920,10 @@ fn pool(
                 best = nearest(&darkest, palette);
             }
             grid[i] = best;
+            // Tile-level confidence in 0.0..=1.0: coverage share, or exactly
+            // 1.0 for a stud the outline pass preserved — which is what makes
+            // the color-limit repair pass treat those tiles as immovable.
             confidence[i] = if preserve_ink {
-                // Reserved for outline/ink preservation: the color-limit
-                // repair pass treats exactly these tiles as immovable.
                 1.0
             } else {
                 (f64::from(counts[best]) / n).min(0.999_999)
@@ -970,8 +975,8 @@ fn bright_channel(
 ) -> bool {
     let w = width * OVERSAMPLE;
     let h = height * OVERSAMPLE;
-    // `strength` is protection strength: higher = more willing to keep a gap
-    // open. Evidence thresholds loosen as it rises, reaching the released
+    // `strength` is protection strength: higher keeps a gap open more
+    // readily. Thresholds loosen as it rises, reaching the released
     // face-detail behavior (3 clear / 2 flanked / flank 55) at 1.0. Flank
     // darkness stays near mid-gray so outlines remain detectable boundaries.
     let need_clear = 3 + ((1.0 - strength) * 1.999) as usize;

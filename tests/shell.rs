@@ -4,15 +4,11 @@
 //! Invariants of the app shell source, of what is and is not committed, and of
 //! the workflow that publishes the site.
 //!
-//! Everything here reads committed files. `dist/` is build output and is
-//! gitignored, so the release gate — which exports the candidate tree — never
-//! has it, and cannot build it either: that needs the wasm target and a pinned
-//! `wasm-bindgen` CLI. A test asserting on `dist/` would therefore run only in
-//! a developer's checkout, which is exactly where it is least likely to catch
-//! anything, so those assertions are gone rather than skipped.
-//!
-//! What covers the built output is running the two build steps, in the order
-//! AGENTS.md gives them. A test on a leftover directory cannot do that job.
+//! Everything here reads committed files. `dist/` is gitignored build output,
+//! so the release gate — which exports the candidate tree — never has it, and
+//! cannot build it either: that needs the wasm target and a pinned
+//! `wasm-bindgen` CLI. What covers the built output is running the two build
+//! steps, in the order AGENTS.md gives them.
 //!
 //! One thing these tests do keep: the property that a committed build never
 //! rots. That was the reason the wasm artefacts were committed, and it is the
@@ -685,7 +681,7 @@ fn the_pages_workflow_expects_exactly_the_files_the_site_is() {
         );
     }
     // The two wasm artefacts are the studio itself. Nothing else in this list
-    // is JavaScript *code*: `worker.js` is the 125-byte bootstrap the bindings
+    // is JavaScript *code*: `worker.js` is the 4-line bootstrap the bindings
     // start, and `service-worker.js` is the caching shell, both committed and
     // copied. So the name worth guarding is the one that must not appear.
     assert!(
@@ -1155,10 +1151,9 @@ fn the_pages_workflow_is_the_only_thing_that_can_publish() {
 fn strip_rust_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut rest = source;
-    // A line comment runs to the end of the line, and a block comment to its
-    // closer. A `//` inside a string literal is not a comment, but none of the
-    // strings these tests look for contain one, and a full Rust tokenizer is
-    // not worth the complexity to guard against it.
+    // A `//` inside a string literal is not a comment, but none of the strings
+    // these tests look for contain one, and a full Rust tokenizer is not worth
+    // the complexity to guard against it.
     while let Some(start) = rest.find('/') {
         let after = &rest[start + 1..];
         if let Some(tail) = after.strip_prefix("//") {

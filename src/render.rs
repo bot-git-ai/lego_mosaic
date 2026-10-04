@@ -6,6 +6,8 @@
 //! not verified. Every output uses the same final mosaic grid.
 
 #![allow(
+    // Cell and pixel coordinates are u32/usize scaled by a clamped cell
+    // size; the grid is at most 192×192, so no cast loses meaningful range.
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
@@ -325,7 +327,7 @@ pub struct PartCount {
     pub count: usize,
 }
 
-/// Aggregate the grid into per-color counts, sorted by count descending.
+/// Per-color tile totals, sorted by count descending.
 pub fn parts_list(mosaic: &Mosaic) -> Vec<PartCount> {
     let mut counts = vec![0_usize; mosaic.palette.len()];
     for &index in &mosaic.grid {
@@ -346,16 +348,15 @@ pub fn parts_list(mosaic: &Mosaic) -> Vec<PartCount> {
     parts
 }
 
-/// The grid as rows of color names — the build instruction rows, matching
-/// what the builder places stud by stud from bottom to top (like LEGO
-/// instructions, row 1 is the bottom of the mosaic).
+/// Build-instruction rows, bottom-up: row 1 is the bottom of the picture,
+/// as a builder places studs from the base upward.
 pub fn build_rows(mosaic: &Mosaic) -> Vec<Vec<(String, String)>> {
     build_rows_order(mosaic, true)
 }
 
-/// Color-name/hex pairs in build order, always left to right within each row.
-/// `bottom_up = false` follows the picture from top to bottom; `true` starts
-/// at the bottom, matching [`build_rows`]. The source mosaic is never modified.
+/// Per-row (name, hex) pairs in build order, always left to right within a
+/// row. `bottom_up = false` follows the picture top to bottom; `true`
+/// matches [`build_rows`]. The source mosaic is never modified.
 pub fn build_rows_order(mosaic: &Mosaic, bottom_up: bool) -> Vec<Vec<(String, String)>> {
     let mut rows = Vec::with_capacity(mosaic.height);
     for row_index in 0..mosaic.height {

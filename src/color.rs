@@ -12,7 +12,7 @@ const WHITE_X: f64 = 0.950_47;
 const WHITE_Y: f64 = 1.0;
 const WHITE_Z: f64 = 1.088_83;
 
-/// A color in linear-sRGB-independent sRGB space (0–255 components).
+/// An sRGB color with 0–255 components.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Srgb {
     pub r: u8,
@@ -30,21 +30,18 @@ impl Srgb {
         format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
     }
 
-    /// sRGB → CIELAB (D65 reference white), following the classic pipeline:
-    /// inverse companding → linear RGB → XYZ (D65) → Lab.
+    /// sRGB → CIELAB (D65 reference white): inverse companding → linear RGB →
+    /// XYZ (D65) → Lab.
     pub fn to_lab(self) -> Lab {
         let [lr, lg, lb] = [
             inverse_compand(f64::from(self.r) / 255.0),
             inverse_compand(f64::from(self.g) / 255.0),
             inverse_compand(f64::from(self.b) / 255.0),
         ];
-        // sRGB (D65) matrix, coefficients normalized so X+Y+Z sums to 1
-        // against the D65 white point.
         let x = 0.412_456_4 * lr + 0.357_576_1 * lg + 0.180_437_5 * lb;
         let y = 0.212_672_9 * lr + 0.715_152_2 * lg + 0.072_175_0 * lb;
         let z = 0.019_333_9 * lr + 0.119_192_0 * lg + 0.950_304_1 * lb;
-        // Normalize by the D65 reference white so pure white maps to
-        // L* = 100, a* = b* = 0.
+        // WHITE_* scales pure white to L* = 100, a* = b* = 0.
         Lab {
             l: 116.0 * f(y / WHITE_Y) - 16.0,
             a: 500.0 * (f(x / WHITE_X) - f(y / WHITE_Y)),
@@ -53,7 +50,7 @@ impl Srgb {
     }
 }
 
-/// CIELAB color (D65).
+/// A CIELAB color (D65).
 #[derive(Clone, Copy, Debug)]
 pub struct Lab {
     pub l: f64,
@@ -91,7 +88,6 @@ pub fn delta_e_2000(lab1: &Lab, lab2: &Lab) -> f64 {
     let c2 = (a2 * a2 + b2 * b2).sqrt();
     let c_bar = f64::midpoint(c1, c2);
     let c_bar7 = c_bar.powi(7);
-    // Hue-chromaticity compensation factor G.
     let g = 0.5 * (1.0 - (c_bar7 / (c_bar7 + 25.0_f64.powi(7))).sqrt());
     let a1p = a1 * (1.0 + g);
     let a2p = a2 * (1.0 + g);
@@ -104,7 +100,8 @@ pub fn delta_e_2000(lab1: &Lab, lab2: &Lab) -> f64 {
     let dl = l2 - l1;
     let dc = c2p - c1p;
 
-    // Mean hue, handling the wrap-around when the two hues are far apart.
+    // Mean hue, handling the wrap-around when the two hues are far apart. Zero
+    // chroma leaves the hue undefined, so delta_h is zero.
     let chroma_product = c1p * c2p;
     let dhp = if chroma_product.abs() < f64::EPSILON {
         0.0
@@ -159,7 +156,8 @@ pub fn delta_e_2000(lab1: &Lab, lab2: &Lab) -> f64 {
     let term_l = dl / sl * (dl / sl);
     let term_c = dc / sc;
     let term_h = dhp / sh;
-    // Cross term with the SIGNED product of the chroma and hue terms.
+    // The cross term uses the SIGNED chroma×hue product, which is why the
+    // chroma terms are not squared before it is added.
     (term_l + term_c * term_c + term_h * term_h + rt * term_c * term_h).sqrt()
 }
 
@@ -224,9 +222,9 @@ mod tests {
     /// Lab triple for the reference table below.
     type LabTriple = (f64, f64, f64);
 
-    /// CIEDE2000 reference pairs from Sharma, Wu & Dalal (2005).
-    /// (The dataset pair yielding 17.5649 in some copies is a known
-    /// erratum; independent implementations give ≈12.7.)
+    /// CIEDE2000 reference pairs from Sharma, Wu & Dalal (2005). One pair
+    /// yielding 17.5649 in some copies is a known erratum; independent
+    /// implementations give ≈12.7.
     #[test]
     fn matches_sharma_reference_pairs() {
         let cases: &[(LabTriple, LabTriple, f64)] = &[

@@ -86,7 +86,7 @@ fn separator_guard_is_end_to_end_monotonic_through_the_cli() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // The un-guarded default equals guard 1.0 (documented default).
+    // No recipe at all, so the shipped default `separator_guard` applies.
     let default_svg = convert(None, &dir, "default");
     let black = 8_usize;
     assert_eq!(

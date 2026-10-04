@@ -4,8 +4,8 @@
 //! Write the static app shell to `dist/` while the crate compiles.
 //!
 //! The studio is a browser application, so publishing it is a file copy, not a
-//! program run. Six of the nine shell files are committed as they are; the
-//! other three are derived:
+//! program run. Four of the nine shell files are copied from committed
+//! sources and three are derived here:
 //!
 //! * `icon-192.png` and `icon-512.png` are rasterized from `assets/icon.svg`,
 //!   which is the committed source of truth for the icon and is never replaced
@@ -17,12 +17,10 @@
 //!   exactly when the shell does.
 //!
 //! Everything is written to `dist/`, which is the whole site and the only copy.
-//! An earlier version mirrored the files into `OUT_DIR` so the tests could read
-//! them there, but that copy never held the wasm artefacts -- they belong to the
-//! `wasm-bindgen` step, which writes only to `dist/`. The tests were therefore
-//! asserting against a six-file subset that was not the site, and passed only
-//! where a previous build had left the real files lying around. One directory,
-//! one truth.
+//! An earlier version also mirrored the files into `OUT_DIR` for the tests, but
+//! that copy never held the two wasm artefacts -- they belong to the
+//! `wasm-bindgen` step, which writes only to `dist/` -- so the tests were
+//! asserting against a subset that was not the site.
 //!
 //! `cargo build --release` therefore leaves a publishable site behind, and no
 //! `cargo run` step exists.
@@ -33,16 +31,14 @@ use std::path::{Path, PathBuf};
 
 /// The files this script owns, and the committed file each is copied from.
 ///
-/// `icon.svg` is the author's original, copied unchanged: it is the icon the
-/// page links and the one a browser falls back to, and it is the same file the
-/// install PNGs are rasterized from, so the site can never link a different
-/// drawing than the one it shipped a PNG of.
+/// `icon.svg` is copied unchanged: the page links it, a browser falls back to
+/// it, and the install PNGs are rasterized from it, so the site can never link
+/// a different drawing than the one it shipped a PNG of.
 ///
-/// The two wasm artefacts are deliberately absent: they are written into
-/// `dist/` by the `wasm-bindgen` step, which runs *after* a wasm build and
-/// *before* this one. They are build output and are never committed, so they
-/// have no committed source to copy from — and this script must not delete
-/// them, because they are the studio itself.
+/// The two wasm artefacts are deliberately absent: the `wasm-bindgen` step
+/// writes them into `dist/` and they are never committed, so they have no
+/// committed source to copy from — and this script must not delete them,
+/// because they are the studio itself.
 const SHELL: &[(&str, &str)] = &[
     ("index.html", "src/ui.html"),
     ("worker.js", "src/worker.js"),
@@ -60,12 +56,11 @@ const ICON_SIZES: [u32; 2] = [192, 512];
 fn main() {
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
 
-    // The site is built only for the host target. This script also runs during
-    // `cargo build --lib --target wasm32-unknown-unknown`, and at that moment
-    // `assets/mosaic_bg.wasm` and `assets/mosaic.js` are the *output* of that
-    // build: they do not exist yet, so writing the site there would fail on
-    // the very step that produces them. The host build that follows the
-    // wasm-bindgen pass is the one that publishes.
+    // Build the site only for the host target: this script also runs during
+    // `cargo build --lib --target wasm32-unknown-unknown`, where
+    // `mosaic_bg.wasm` and `mosaic.js` are the *output* of that build and do
+    // not exist yet. The host build after the wasm-bindgen pass is the one that
+    // publishes.
     let target = std::env::var("TARGET").unwrap_or_default();
     if target != "wasm32-unknown-unknown" && target.contains("wasm") {
         return;
@@ -75,9 +70,9 @@ fn main() {
     }
 
     // Watch the SOURCE paths, not the output names: cargo compares these
-    // against real files, so `service-worker.js` and `ui.html` have to be
-    // named as the files they are. Watching the destination names watches
-    // files that never change, and the script then never re-runs.
+    // against real files, so `ui.html` and `service-worker.js` must be named
+    // as the files they are. Watching the destination names watches files that
+    // never change, and the script then never re-runs.
     for (_, source) in SHELL {
         println!("cargo:rerun-if-changed={source}");
     }
@@ -92,10 +87,8 @@ fn main() {
     }
     built.extend(rasterize_icons(&root));
 
-    // The worker's own template is hashed too, and it is deliberately kept
-    // out of `built` so it is hashed exactly once, in template form. A change
-    // to the caching logic must invalidate the cache: clients holding the old
-    // worker would otherwise keep running stale logic against new assets.
+    // Hash the worker's own template in template form, keeping it out of
+    // `built` so its version placeholder is not hashed twice.
     let template = std::fs::read_to_string(root.join("src/service-worker.js"))
         .unwrap_or_else(|error| panic!("reading src/service-worker.js: {error}"));
     let version = cache_version(&built, &template);
@@ -112,12 +105,10 @@ fn main() {
 
 /// Rasterize `assets/icon.svg` at each install size.
 ///
-/// `assets/icon.svg` is the committed, authoritative, hand-editable icon: the
-/// 3x3 grid of studs that is the whole idea of the app at home-screen size.
-/// These PNGs are build output derived from it, which is why neither exists in
-/// the tree between builds. Committing them was what let the two sizes drift
-/// into two different icons — a hand-made pair of PNGs is two hand-made icons,
-/// and only one of them is ever looked at.
+/// These PNGs are build output derived from `assets/icon.svg`, which is why
+/// neither exists in the tree between builds. Committing them was what let the
+/// two sizes drift into two different icons — a hand-made pair of PNGs is two
+/// hand-made icons, and only one of them is ever looked at.
 ///
 /// Renders straight to each size rather than rasterizing at 512 and
 /// downscaling: the source is a 512-unit viewBox, so a 192 render and a 512
@@ -146,9 +137,8 @@ fn rasterize_icons(root: &Path) -> Vec<(&'static str, Vec<u8>)> {
         let png = pixmap
             .encode_png()
             .unwrap_or_else(|error| panic!("encoding icon-{size}.png: {error}"));
-        // A vector that failed to parse can render as a blank square, and an
-        // install icon that is blank is worse than a build failure: it is only
-        // ever noticed on a home screen.
+        // A blank install icon is only ever noticed on a home screen, so fail
+        // the build instead.
         assert!(
             !png.is_empty() && png.len() > 100,
             "icon-{size}.png rasterized to nothing; assets/icon.svg is empty or unrenderable"
@@ -160,18 +150,15 @@ fn rasterize_icons(root: &Path) -> Vec<(&'static str, Vec<u8>)> {
 
 /// Hand a formatted name out with a `'static` lifetime.
 ///
-/// The icons are built once per build and only borrowed for the length of
-/// `write_tree`, so this keeps `built` a flat list of pairs rather than
-/// threading an owned-name type through three functions.
+/// The icons are built once and only borrowed for the length of `write_tree`,
+/// so this keeps `built` a flat list of pairs instead of threading an
+/// owned-name type through three functions.
 fn leak(name: String) -> &'static str {
     Box::leak(name.into_boxed_str())
 }
 
-/// A cache name derived from the bytes of every shell file except the worker.
-///
-/// It deliberately covers the worker's own source: a change to the caching
-/// logic must invalidate the cache too, or clients keep running the old logic
-/// against new assets.
+/// A cache name derived from the bytes of every shell file, plus the worker's
+/// own template.
 fn cache_version(built: &[(&str, Vec<u8>)], worker_template: &str) -> String {
     let mut hasher = DefaultHasher::new();
     for (name, bytes) in built {

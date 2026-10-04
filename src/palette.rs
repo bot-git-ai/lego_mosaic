@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 // AGPL License
 
-//! Tile palettes. Mosaic Maker uses white, two grays, black and yellow.
+//! Tile palettes. `MOSAIC_MAKER` is the official five (white, two grays,
+//! black, yellow); `MONOCHROME` and `EXTENDED` are design palettes.
 //! Part 98138 is a 1×1 round TILE (smooth top), not a round plate.
 //! Extended colors are an approximate design palette, not a verified
 //! inventory: check the part/color combination and current stock before
@@ -54,7 +55,7 @@ pub const MOSAIC_MAKER: &[TileColor] = &[
     TileColor::new("Yellow", 0xF2, 0xCD, 0x37),
 ];
 
-/// Just the neutral ramp: white, grays, black. Good for the pixel-art look.
+/// The neutral ramp: white, grays, black. Good for the pixel-art look.
 pub const MONOCHROME: &[TileColor] = &[
     TileColor::new("White", 0xF2, 0xF3, 0xF2),
     TileColor::new("Very Light Gray", 0xE0, 0xE0, 0xDD),

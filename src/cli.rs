@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 // AGPL License
 //! Native I/O and argument handling only. Pixel conversion and every SVG/CSV
-//! byte are produced by the same library used by browser.rs.
+//! byte are produced by the same library used by `browser.rs`.
 use lego_mosaic::{HueMode, Options, Order, Raster};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

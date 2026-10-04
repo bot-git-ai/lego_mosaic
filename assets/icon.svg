@@ -8,19 +8,19 @@
 
   The design is nine yellow studs and nothing else: the shape a LEGO mosaic
   reduces an image to, at the size a home screen shows it. There is no
-  background, and that is deliberate — the icon takes whatever colour the
-  place it is shown already has. A field behind the studs only ever fought
-  that: on a dark launcher it was a slightly-different dark, on a light one a
-  dark square, and on a wallpaper-matched launcher a rectangle nobody asked
-  for. The studs are the mark; anything behind them is furniture.
+  background, and that is deliberate — the icon takes whatever colour the place
+  it is shown already has. A field behind the studs only ever fought that: on a
+  dark launcher it was a slightly-different dark, on a light one a dark square,
+  and on a wallpaper-matched launcher a rectangle nobody asked for. The studs
+  are the mark; anything behind them is furniture.
 
   The geometry, in a 512 viewBox:
     * centres at 143, 256, 369 — pitch 113, so the 104 margin on the left
       and right is the same, and the grid is exactly centred.
     * radius 39 — the gap between studs (35) is a shade under the pitch, so
       the grid reads as separate tiles rather than a lattice.
-    * nothing else is drawn. With no background there is nothing to run off
-      the edge, so the file simply ends after the nine circles.
+    * nothing else is drawn; with no background there is nothing to run off
+      the edge.
 
   The outermost stud's edge sits at 198.8 from the centre, inside the 204.8
   radius maskable safe zone, so a circular crop — the manifest declares

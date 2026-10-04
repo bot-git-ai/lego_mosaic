@@ -1311,7 +1311,7 @@ fn crop_wheel(state: &Shared, event: &Event) -> Result<(), JsValue> {
 }
 
 /// Arrow-key nudge of a focused corner handle, one source pixel per press
-/// (ten with Shift). Keeps grid aspect like dragging.
+/// (ten with Shift). Keeps grid aspect like a drag.
 fn crop_handle_key(state: &Shared, handle_name: &str, event: &Event) -> Result<(), JsValue> {
     let Some(handle) = CropHandle::of(handle_name) else {
         return Ok(());
@@ -1368,7 +1368,7 @@ fn anchored_frame(
     // Keep at least one grid cell: useful on small images, where a fixed
     // source-pixel floor could swallow the whole frame.
     let min_side = cell_size(raster);
-    // Desired half-extents from the pinned corner.
+    // The corner diagonally opposite `handle`: the frame's new fixed point.
     let (px, py) = match handle {
         CropHandle::Nw => (origin.x + origin.w, origin.y + origin.h),
         CropHandle::Ne => (origin.x, origin.y + origin.h),
@@ -1393,8 +1393,7 @@ fn anchored_frame(
         h = raster.height as f64;
         w = (h * aspect).min(raster.width as f64);
     }
-    // The opposite corner stays pinned: it is the fixed corner of the new
-    // frame (Se pins under an Nw drag, Sw under Ne, etc.).
+    // Position the frame from that pinned corner.
     let (x, y) = match handle {
         CropHandle::Nw => (px - w, py - h),
         CropHandle::Ne => (px, py - h),
