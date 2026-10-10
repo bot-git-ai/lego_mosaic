@@ -172,9 +172,20 @@ fn the_shell_is_mountable_anywhere() {
         .expect("the committed manifest"),
     )
     .expect("the manifest is valid JSON");
-    for key in ["start_url", "scope", "id"] {
+    for key in ["start_url", "scope"] {
         assert_eq!(manifest[key], "./", "{key} must be relative");
     }
+    // The manifest must declare no `id`. Chrome resolves a relative id against
+    // start_url's ORIGIN, not the manifest's directory, so the `"./"` this
+    // file once carried gave every app in the family the same install
+    // identity: Android treats a manifest whose id matches an installed app as
+    // an update of that app, and the second install is swallowed. Left out,
+    // identity falls back to `start_url` -- this app's own mount point, unique
+    // per app.
+    assert!(
+        manifest.get("id").is_none(),
+        "the manifest must not declare an id: \"./\" resolves to the bare origin and collides with every sibling app"
+    );
 }
 
 /// The service worker is a committed template with exactly one placeholder, and

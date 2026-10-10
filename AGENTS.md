@@ -86,6 +86,15 @@ The nine files arrive from two builds:
   in the directory **and its own source** — so a change to the caching logic
   invalidates the cache too, and changing the wasm moves the version.
 
+The manifest declares **no `id`**. The member is the app's install identity,
+and Chrome resolves a relative id against `start_url`'s *origin*, not the
+manifest's directory — so the `"id": "./"` this file once carried resolved to
+the bare `wdomitrz.github.io` for every app in the family at once, and Android
+swallowed every second install as an update of the first. Left out, identity
+falls back to `start_url` — this app's own mount point, unique per app.
+`start_url` and `scope` stay `"./"`: those *do* resolve against the manifest
+URL and are what makes one build mount from any subdirectory.
+
 `build.rs` writes only the files it owns, each under a scratch name and
 renamed into place, so a host serving `dist/` never sees a half-written file.
 It does not replace the directory, because the wasm step owns two files in
