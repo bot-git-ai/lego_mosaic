@@ -1689,6 +1689,148 @@ async fn release_stale_registrations() {
     }
 }
 
+/// Ask this app's service worker to update as soon as it can take over.
+///
+/// The worker never swaps itself in unasked: an update waits for every page
+/// it controls to close, because a mosaic mid-render must not run half old
+/// code under half new. Left exactly there, an installed copy would update
+/// only when every opening of it has closed - on a phone, possibly never. So
+/// this asks, and the ask is safe by construction: the sender is the page
+/// itself, which then reloads as the swap happens. The worker answers the
+/// message with `skipWaiting`, the browser fires `controllerchange`, the page
+/// reloads exactly once, and the old worker is redundant. No client ever
+/// straddles the two versions - the one that asked is the one that stepped
+/// aside.
+///
+/// The message is sent for a worker already installed and waiting, and for
+/// one still installing - sent on `installed` in the second case, after a
+/// `statechange` wait - and a `controllerchange` arriving with no reload of
+/// ours in flight is answered by one reload, so a version swap is never
+/// better than one reload away, whatever path it came in on.
+///
+/// Best effort like everything around it: a failure is a console line, and a
+/// studio that stays on this version still renders.
+async fn nudge_worker_update(registration: &web_sys::ServiceWorkerRegistration) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+
+    // The reload that follows a swap. The flag keeps it one-per-swap, so a
+    // late `updatefound` from the same registration cannot reload again
+    // underneath it.
+    watch_for_controller_change(&window);
+
+    // A worker installed and waiting for pages like this one to close. This
+    // is the state an update is left in when a visit ended before its
+    // handover: nothing new will arrive until the served bytes change again,
+    // so this is the one chance to ask it in.
+    if let Some(worker) = registration.waiting() {
+        if worker.state() == web_sys::ServiceWorkerState::Installed {
+            ask_worker_in(&worker);
+            return;
+        }
+    }
+
+    // A worker installing right now - this visit's own update check found
+    // one - or one that arrives later while the page stands.
+    let installing = match registration.installing() {
+        Some(worker) => Some(worker),
+        None => update_found(registration).await,
+    };
+    let Some(worker) = installing else {
+        return;
+    };
+    if wait_for_state_change(&worker).await.is_err() {
+        web_sys::console::warn_1(&JsValue::from_str(
+            "lego_mosaic: could not wait for the worker to install.",
+        ));
+        return;
+    }
+    if worker.state() == web_sys::ServiceWorkerState::Installed {
+        ask_worker_in(&worker);
+    }
+}
+
+/// Send the message the worker answers with `skipWaiting`.
+fn ask_worker_in(worker: &web_sys::ServiceWorker) {
+    worker.post_message(&JsValue::from_str("SKIP_WAITING")).ok();
+}
+
+/// Reload once when the worker in charge changes.
+///
+/// The guard is the in-flight flag: an ask sent twice would fire the event
+/// once, and a second registration's late update could fire it again under a
+/// page already reloading. One reload per swap, and never two in a row, is
+/// what keeps this from becoming the loop the naive version of this code is:
+/// a page that reloads unasked on `installed` never lets the waiting worker
+/// activate, because a reloading page still counts as a client.
+fn watch_for_controller_change(window: &web_sys::Window) {
+    thread_local! {
+        static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if WATCHING.with(std::cell::Cell::get) {
+        return;
+    }
+    WATCHING.with(|watching| watching.set(true));
+
+    let container = window.navigator().service_worker();
+    let handler = Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
+        if let Some(window) = web_sys::window() {
+            window.location().reload().ok();
+        }
+    });
+    let _ = container
+        .add_event_listener_with_callback("controllerchange", handler.as_ref().unchecked_ref());
+    // Never dropped: exactly one listener for the page's lifetime, and the
+    // guard above makes re-registering a no-op.
+    handler.forget();
+}
+
+/// The worker this registration announces through `updatefound`, if one
+/// arrives while the page stands.
+///
+/// The event carries the registration, not the worker; the worker is its
+/// `installing` one. `None` resolves the wait empty if the registration is
+/// ever torn down between the two states this cares about.
+async fn update_found(
+    registration: &web_sys::ServiceWorkerRegistration,
+) -> Option<web_sys::ServiceWorker> {
+    let event = JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+        let resolved = Closure::<dyn FnMut(JsValue)>::new(move |value: JsValue| {
+            resolve.call1(&JsValue::NULL, &value).ok();
+        });
+        let _ = registration
+            .add_event_listener_with_callback("updatefound", resolved.as_ref().unchecked_ref());
+        // Never dropped: the promise settles at most once, and the
+        // registration outlives the page anyway.
+        resolved.forget();
+    }))
+    .await
+    .ok()?;
+    let event = event.dyn_into::<web_sys::Event>().ok()?;
+    let announced = event
+        .target()?
+        .dyn_into::<web_sys::ServiceWorkerRegistration>()
+        .ok()?;
+    announced.installing()
+}
+
+/// Resolve at the worker's next state change, whichever it is.
+async fn wait_for_state_change(worker: &web_sys::ServiceWorker) -> Result<(), JsValue> {
+    JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+        let resolved = Closure::<dyn FnMut(JsValue)>::new(move |value: JsValue| {
+            resolve.call1(&JsValue::NULL, &value).ok();
+        });
+        let _ = worker
+            .add_event_listener_with_callback("statechange", resolved.as_ref().unchecked_ref());
+        // Never dropped, like the one above: at most one state change is
+        // waited for here, and the worker outlives the page.
+        resolved.forget();
+    }))
+    .await
+    .map(|_| ())
+}
+
 /// Whether a worker script at `script` is this app's own worker, registered for
 /// more of the origin than this app's directory.
 ///
@@ -1721,7 +1863,17 @@ pub fn start() -> Result<(), JsValue> {
             // the claim as small as the app.
             let options = web_sys::RegistrationOptions::new();
             options.set_scope(SCOPE);
-            JsFuture::from(container.register_with_options("./service-worker.js", &options)).await?;
+            let registered = JsFuture::from(
+                container.register_with_options("./service-worker.js", &options),
+            )
+            .await?;
+            // The promise resolves to the registration, which is the handle
+            // the update nudge watches.
+            if let Ok(registered) =
+                registered.dyn_into::<web_sys::ServiceWorkerRegistration>()
+            {
+                nudge_worker_update(&registered).await;
+            }
             JsFuture::from(container.ready()?).await?;
             text("offline-status", "Ready for offline use. Install Mosaic Studio from your browser menu. Only app assets are cached; images stay in memory.")
         }.await;

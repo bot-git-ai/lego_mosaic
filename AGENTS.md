@@ -170,7 +170,11 @@ conversion tool, and publishing is the build's job.
 - `worker.rs`: Rust dedicated-worker protocol and conversion; transferable pixels,
   per-job termination, startup error handling, 120s timeout and cancellation.
 - `service-worker.js`: caches only a fixed app-shell allowlist, scope-specific
-  content-versioned cache, atomic install, no skipWaiting/mixed-version updates.
+  content-versioned cache, atomic install, and a `skipWaiting` that answers
+  only the page's `SKIP_WAITING` message (see `browser.rs`'s
+  `nudge_worker_update`; the page reloads on `controllerchange`), so an
+  installed copy updates on its next open — no mixed-version page/worker
+  pairs, and no update waiting for a visit that never comes.
   The fetch handler also refuses any request outside this app's own directory
   (`IS_OWN`), so a wide or stale registration cannot answer for the pages this
   origin serves beside the studio. Offline needs one successful online visit

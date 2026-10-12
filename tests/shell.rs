@@ -50,6 +50,67 @@ fn shell() -> String {
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
+/// The worker's `skipWaiting` is message-gated.
+///
+/// An update never swaps itself in unasked; the one ask is the page's
+/// `SKIP_WAITING` message, and the page that sends it reloads on
+/// `controllerchange`. Asserted structurally so an unprompted call cannot
+/// creep in.
+#[test]
+fn the_worker_answers_only_the_pages_ask_with_skip_waiting() {
+    let worker = worker_template();
+    let handler = worker
+        .split("addEventListener('message'")
+        .nth(1)
+        .expect("the worker must listen for the page's handover message");
+    let handler = &handler[..handler.find("});").expect("the message handler closes")];
+    assert!(
+        handler.contains("event.data === 'SKIP_WAITING'") && handler.contains("skipWaiting()"),
+        "skipWaiting must be the worker's answer to the page's ask, never a call \
+         it makes on its own"
+    );
+    let outside: Vec<&str> = worker
+        .split("addEventListener('message'")
+        .next()
+        .expect("the prefix before the handler")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter(|line| line.contains("skipWaiting"))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "no skipWaiting outside the message handler: an update must never swap \
+         the wasm under a live tab unasked, but found {outside:?}"
+    );
+}
+
+/// The page asks a newly installed worker in, and reloads as it takes over.
+///
+/// Without the ask, an installed copy only ever moves to a new version when
+/// every opening of it has closed — on a phone, possibly never. This pins
+/// both halves: the page's message, which the worker answers with
+/// `skipWaiting`, and the page's own reload on `controllerchange`.
+#[test]
+fn the_page_takes_an_installed_worker_over_with_a_reload() {
+    let browser =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/browser.rs"))
+            .expect("src/browser.rs");
+    assert!(
+        browser.contains("registration.waiting()") && browser.contains(".installing()"),
+        "the page must look at both workers an update can leave behind: one already \
+         installed and waiting, and one discovered while the page stands"
+    );
+    assert!(
+        browser.contains("post_message(&JsValue::from_str(\"SKIP_WAITING\"))"),
+        "the handover starts with the page's message; the worker never swaps \
+         itself in unasked"
+    );
+    assert!(
+        browser.contains("controllerchange") && browser.contains("location().reload()"),
+        "and ends with the page reloading exactly as the worker takes over"
+    );
+}
+
 /// The service worker template, as committed.
 ///
 /// `build.rs` hashes this file's bytes into the cache name and writes the
