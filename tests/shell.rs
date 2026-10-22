@@ -1170,3 +1170,24 @@ fn strip_rust_comments(source: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// One name: the launcher label is the app's own name.
+///
+/// `short_name` is what a home screen shows under the icon, and a shortened one
+/// only works if it still names the thing. "Mosaic" under the icon named a
+/// pattern, not the tool; the label is the whole of what a user sees once the
+/// app is installed.
+#[test]
+fn the_launcher_label_is_the_apps_name() {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/manifest.webmanifest"),
+        )
+        .expect("the committed manifest"),
+    )
+    .expect("the manifest is valid JSON");
+    assert_eq!(
+        manifest["short_name"], manifest["name"],
+        "short_name must be exactly the name, not a shorter name for another thing"
+    );
+}
