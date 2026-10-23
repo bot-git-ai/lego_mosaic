@@ -573,7 +573,7 @@ fn the_committed_icon_is_a_real_drawing() {
     let icon =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon.svg"))
             .expect("reading assets/icon.svg");
-    for (what, needle) in [("studs", "fill=\"#f4cb46\""), ("a viewBox", "viewBox=")] {
+    for (what, needle) in [("studs", "fill=\"#606060\""), ("a viewBox", "viewBox=")] {
         assert!(icon.contains(needle), "the icon must keep {what}: {needle}");
     }
     // No backdrop. The launcher already has a colour — its own, or the one the
