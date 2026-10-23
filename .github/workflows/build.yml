@@ -165,15 +165,27 @@ jobs:
         run: |
           set -eu
           # No test can assert on `dist/`: it is gitignored, so the release
-          # gate's exported tree never has it (see tests/shell.rs). The build
-          # is therefore the only thing that ever checks it -- so this checks
-          # it, rather than trusting a green job to mean the site is whole.
+          # gate's exported tree never has it (see tests/shell.rs). The build is
+          # therefore the only thing that ever checks it -- so this checks it,
+          # rather than trusting a green job to mean the site is whole.
           #
-          # A green build that produced four of the eight files is exactly the
-          # failure this project has already had: `write_tree` once swapped the
-          # whole directory and took the wasm with it, leaving a
-          # publishable-looking site with no studio in it. Verify the count,
-          # not the exit status.
+          # A green build that produced seven of these eight files is exactly the
+          # failure this shape has already had: a wholesale directory swap once
+          # took the wasm with it, leaving a publishable-looking site with no app
+          # in it. Verify the file list, not the exit status.
+          #
+          # The Python below runs from a quoted heredoc, not from `python3 -c`,
+          # and it must stay that way. An indented `python3 -c "..."` body is
+          # quoted by the shell before Python ever sees it, so a single quote in
+          # the body ends the string early and the failure is a shell parse error
+          # pointing at nothing that looks wrong. Three sibling workflows had
+          # exactly that. The quoted delimiter also stops the shell expanding `$`
+          # inside the body.
+          #
+          # This step is identical in `build.yml` and `pages.yml`, and a test
+          # asserts that: one runs on pull requests, the other before publishing,
+          # and a check that differs between them lets a pull request pass a site
+          # the deploy rejects.
           expected="icon-192.png icon-512.png icon.svg index.html manifest.webmanifest mosaic_bg.wasm mosaic.js service-worker.js worker.js"
           missing=""
           for file in $expected; do
@@ -194,7 +206,7 @@ jobs:
             exit 1
           fi
           # A file of a few bytes is a truncated write, not a successful build.
-          test -s dist/mosaic_bg.wasm || { echo "::error::the studio wasm is empty"; exit 1; }
+          test -s dist/mosaic_bg.wasm || { echo "::error::the app wasm is empty"; exit 1; }
           # The cache version is derived at build time, so an unsubstituted
           # placeholder would ship a service worker that never invalidates.
           if grep -q '__VERSION__' dist/service-worker.js; then
@@ -206,7 +218,63 @@ jobs:
           # long after the build looked fine.
           grep -q 'export' dist/mosaic.js \
             || { echo "::error::dist/mosaic.js carries no exports; the page's dynamic import would fail"; exit 1; }
+          # And they must carry the start function the page's `m.default()`
+          # call runs. Without it the module loads and the app never starts,
+          # which is a failure with no error message anywhere.
+          grep -q '__wbindgen_start' dist/mosaic.js \
+            || { echo "::error::dist/mosaic.js has no start function; the app would load and never run"; exit 1; }
+          # The icons must be real PNGs at the sizes the manifest declares, not
+          # the SVG copied under a .png name: a file with the right name and no
+          # raster in it installs with a broken icon.
+          for size in 192 512; do
+            test "$(head -c 8 "dist/icon-${size}.png" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" \
+              || { echo "::error::dist/icon-${size}.png is not a PNG"; exit 1; }
+          done
+          # The page must call the initializer. This is a one-line check for a
+          # failure that is otherwise completely silent -- see tests/shell.rs.
+          grep -q 'm.default()' dist/index.html \
+            || { echo "::error::dist/index.html does not initialise the bindings; the app would never start"; exit 1; }
+          python3 - <<'PY'
+          import hashlib, json
+          # The published SVG must be the committed icon, byte for byte. The
+          # page links it and the worker precaches it, so a drift here is both
+          # a wrong favicon and an install that fails.
+          #
+          # The digest is pinned so a redraw cannot pass unnoticed. It must equal
+          # the constant in tests/shell.rs -- the same value in two places, and
+          # both workflows -- so change it in all of them together, or the check
+          # that disagrees with the others goes red and says so.
+          with open("assets/icon.svg", "rb") as handle:
+              source = handle.read()
+          with open("dist/icon.svg", "rb") as handle:
+              published = handle.read()
+          assert published == source, "dist/icon.svg is not the committed icon"
+          assert hashlib.sha256(source).hexdigest() == (
+              "175a10eab7e706d6ebe100a63b8e7feb99abc7843250742944072a6c7381d31a"
+          ), "assets/icon.svg is no longer the recorded icon"
+          print("  ok   dist/icon.svg is the committed icon")
 
+          # The manifest's icon list must be what was actually rasterized, not a
+          # hand-kept copy of the source: that is the whole reason `build.rs`
+          # assembles the manifest.
+          with open("dist/manifest.webmanifest", encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          assert manifest["icons"] == [
+              {"src": f"icon-{size}.png", "sizes": f"{size}x{size}",
+               "type": "image/png", "purpose": "any maskable"}
+              for size in (192, 512)
+          ], manifest["icons"]
+          for key in ("start_url", "scope"):
+              assert manifest[key] == "./", f"{key} must be relative"
+          # No `id`, asserted rather than left out: a relative id resolves to
+          # the bare origin, so every app installed from this repository would
+          # share one identity and collide. This is the rule the whole family
+          # follows, and it is checked in both workflows on purpose.
+          assert "id" not in manifest, (
+              "an id of \"./\" resolves to the bare origin and collides with every sibling app"
+          )
+          print("  ok   manifest agrees with the rasterized icons and mounts anywhere")
+          PY
       - name: Run the tests
         run: cargo test --locked
 
