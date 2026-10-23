@@ -1251,3 +1251,28 @@ fn the_launcher_label_is_the_apps_name() {
         "short_name must be exactly the name, not a shorter name for another thing"
     );
 }
+
+/// Both workflows run the same site check, on the same output.
+///
+/// `build.yml` runs it on every pull request; `pages.yml` runs it again before
+/// publishing. They had drifted apart — each asserted things the other did not —
+/// so a pull request could go green on a site the deploy would reject, and the
+/// deploy could publish a file the pull request never checked.
+#[test]
+fn both_workflows_run_the_same_site_check() {
+    let step = |name: &str| -> Option<String> {
+        let text = workflow(name)?;
+        let start = text.find("      - name: Check the built site")?;
+        let end = text[start..].find("      - name: Run the tests")? + start;
+        Some(text[start..end].to_owned())
+    };
+    let (Some(build), Some(pages)) = (step("build.yml"), step("pages.yml")) else {
+        return; // a partial export need not carry every workflow
+    };
+    assert_eq!(
+        build, pages,
+        "the site check must be identical in build.yml and pages.yml: one runs on \
+         pull requests and the other before publishing, and a check that differs \
+         between them lets a pull request pass a site the deploy rejects"
+    );
+}
